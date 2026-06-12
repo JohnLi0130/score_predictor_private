@@ -13,6 +13,7 @@ from score_predictor.ui.sporttery_only_helpers import (
     normalize_sporttery_only_payload,
     run_sporttery_only_prediction,
 )
+from score_predictor.ui.yaml_io import load_yaml_to_form_state
 from score_predictor.v3.market_calibration import build_market_probabilities
 
 
@@ -207,6 +208,16 @@ def test_sporttery_only_prediction_uses_loaded_payload_not_manual_sample() -> No
     assert normalized["match"]["away_team"] == "Paraguay"
     assert "payload = _load_yaml_from_text(st.session_state.get(\"sporttery_yaml_text\") or SAMPLE_YAML)" not in source
     assert "sporttery_normalized_payload" in source
+
+
+def test_same_new_structure_yaml_populates_main_site_form_state() -> None:
+    state = load_yaml_to_form_state(_new_structure_payload())
+
+    assert state["home_team"] == "Canada"
+    assert state["away_team"] == "Bosnia and Herzegovina"
+    assert state["odds_home_win"] == 1.62
+    assert state["odds_draw"] == 3.32
+    assert state["odds_away_win"] == 4.75
 
 
 def test_sporttery_1x2_is_primary_calibration_source() -> None:

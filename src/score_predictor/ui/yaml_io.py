@@ -316,7 +316,16 @@ def form_state_from_yaml_dict(data: dict[str, Any]) -> dict[str, Any]:
     state["snapshot_time"] = data.get("prediction_time", state["snapshot_time"])
     state["odds_source"] = data.get("odds_source", market.get("odds_source", state["odds_source"]))
 
-    odds_1x2 = market.get("odds_1x2") or data.get("odds_1x2") or {}
+    odds_1x2 = (
+        market.get("odds_1x2")
+        or market.get("sporttery_1x2")
+        or market.get("spf")
+        or data.get("odds_1x2")
+        or data.get("sporttery_1x2")
+        or {}
+    )
+    if isinstance(odds_1x2, dict) and isinstance(odds_1x2.get("odds"), dict):
+        odds_1x2 = odds_1x2["odds"]
     if odds_1x2:
         state["odds_home_win"] = odds_1x2.get("home", state["odds_home_win"])
         state["odds_draw"] = odds_1x2.get("draw", state["odds_draw"])
