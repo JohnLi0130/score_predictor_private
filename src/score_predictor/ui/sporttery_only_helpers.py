@@ -39,10 +39,145 @@ ODDS_MOVEMENT_SETTINGS: dict[str, Any] = {
 DISCLAIMER_ZH = "本系统仅用于概率建模、数据分析和赛后复盘，不构成投注建议。"
 TOTAL_GOALS_BUCKETS = ("0", "1", "2", "3", "4", "5", "6", "7+")
 HALF_FULL_KEYS = {"HH", "HD", "HA", "DH", "DD", "DA", "AH", "AD", "AA"}
+SKIPPED_MARKET_KEYS = {
+    "history",
+    "notes",
+    "warnings",
+    "source",
+    "provider",
+    "snapshot_time",
+    "published_at",
+    "timestamp",
+    "status",
+    "role",
+    "weight",
+    "odds_channels",
+    "markets",
+    "metadata",
+    "data_sources",
+}
+
+
+class SportteryPayloadError(ValueError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        field_path: str | None = None,
+        expected: str | None = None,
+        actual: Any = None,
+        checked_paths: list[str] | None = None,
+        top_level_keys: list[str] | None = None,
+    ) -> None:
+        details = [message]
+        if field_path:
+            details.append(f"字段路径：{field_path}")
+        if expected:
+            details.append(f"期望：{expected}")
+        if actual is not None:
+            details.append(f"实际：{type(actual).__name__}")
+        if checked_paths:
+            details.append(f"已检查路径：{', '.join(checked_paths)}")
+        if top_level_keys:
+            details.append(f"顶层 keys：{', '.join(top_level_keys)}")
+        super().__init__("\n".join(details))
+        self.field_path = field_path
+        self.expected = expected
+        self.actual = actual
+        self.checked_paths = checked_paths or []
+        self.top_level_keys = top_level_keys or []
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:
     return deepcopy(value) if isinstance(value, dict) else {}
+
+
+def _copy_meta(source: dict[str, Any], *, source_path: str) -> dict[str, Any]:
+    result = {"source_path": source_path}
+    history = source.get("history")
+    if isinstance(history, list):
+        result["history"] = deepcopy(history)
+    for key in ("snapshot_time", "published_at", "timestamp"):
+        if source.get(key) is not None:
+            result[key] = source[key]
+    return result
+
+
+def _get_path(payload: dict[str, Any], path: str) -> Any:
+    current: Any = payload
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _first_path(payload: dict[str, Any], paths: list[str]) -> tuple[str | None, Any]:
+    for path in paths:
+        value = _get_path(payload, path)
+        if value is not None:
+            return path, value
+    return None, None
+
+
+def _odds_container(value: Any) -> dict[str, Any]:
+    market = _as_mapping(value)
+    if isinstance(market.get("odds"), dict):
+        return _as_mapping(market.get("odds"))
+    if isinstance(market.get("scores"), dict):
+        return _as_mapping(market.get("scores"))
+    return market
+
+
+def _required_decimal(value: Any, field_path: str) -> float:
+    if isinstance(value, (list, dict)):
+        raise SportteryPayloadError(
+            "解析体彩 YAML 时发现字段类型错误。",
+            field_path=field_path,
+            expected="数字",
+            actual=value,
+        )
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise SportteryPayloadError(
+            "解析体彩 YAML 时发现字段类型错误。",
+            field_path=field_path,
+            expected="数字",
+            actual=value,
+        ) from exc
+    if number <= 1.0:
+        raise SportteryPayloadError(
+            "解析体彩 YAML 时发现无效赔率。",
+            field_path=field_path,
+            expected="大于 1 的数字",
+            actual=value,
+        )
+    return number
+
+
+def _optional_decimal(value: Any, field_path: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, dict)):
+        raise SportteryPayloadError(
+            "解析体彩 YAML 时发现字段类型错误。",
+            field_path=field_path,
+            expected="数字",
+            actual=value,
+        )
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 1.0 else None
+
+
+def _lookup_outcome(source: dict[str, Any], *names: str) -> tuple[str | None, Any]:
+    for name in names:
+        if name in source:
+            return name, source[name]
+    return None, None
 
 
 def _first_mapping(*values: Any) -> dict[str, Any]:
@@ -154,6 +289,248 @@ def _normalize_half_full(value: Any) -> dict[str, Any]:
     return _with_history(odds, market)
 
 
+SPORTTERY_1X2_PATHS = [
+    "odds_1x2",
+    "sporttery_1x2",
+    "sporttery_1x2.odds",
+    "market.odds_1x2",
+    "market.sporttery_1x2",
+    "market.sporttery_1x2.odds",
+    "market.spf",
+    "markets.sporttery.sporttery_1x2",
+    "markets.sporttery.sporttery_1x2.odds",
+    "markets.sporttery.odds_1x2",
+    "markets.sporttery.spf",
+    "markets.calibration.odds_1x2",
+    "markets.calibration.sporttery_1x2",
+    "markets.calibration.sporttery_1x2.odds",
+]
+
+SPORTTERY_HANDICAP_PATHS = [
+    "sporttery_handicap_3way",
+    "handicap_3way",
+    "rqspf",
+    "market.sporttery_handicap_3way",
+    "market.handicap_3way",
+    "market.rqspf",
+    "markets.sporttery.sporttery_handicap_3way",
+    "markets.sporttery.handicap_3way",
+    "markets.sporttery.rqspf",
+    "markets.calibration.sporttery_handicap_3way",
+    "markets.calibration.handicap_3way",
+    "markets.calibration.rqspf",
+]
+
+SPORTTERY_CORRECT_SCORE_PATHS = [
+    "sporttery_correct_score",
+    "sporttery_correct_score_odds",
+    "correct_score_odds",
+    "correct_score",
+    "market.sporttery_correct_score",
+    "market.sporttery_correct_score_odds",
+    "market.correct_score_odds",
+    "market.correct_score",
+    "markets.sporttery.sporttery_correct_score",
+    "markets.sporttery.sporttery_correct_score_odds",
+    "markets.sporttery.correct_score_odds",
+    "markets.sporttery.correct_score",
+    "markets.calibration.sporttery_correct_score",
+    "markets.calibration.correct_score_odds",
+]
+
+SPORTTERY_TOTAL_GOALS_PATHS = [
+    "sporttery_total_goals",
+    "sporttery_total_goals_odds",
+    "total_goals",
+    "market.sporttery_total_goals",
+    "market.sporttery_total_goals_odds",
+    "market.total_goals",
+    "markets.sporttery.sporttery_total_goals",
+    "markets.sporttery.sporttery_total_goals_odds",
+    "markets.sporttery.total_goals",
+    "markets.calibration.sporttery_total_goals",
+    "markets.calibration.total_goals",
+]
+
+SPORTTERY_HALF_FULL_PATHS = [
+    "sporttery_half_full",
+    "half_full_time",
+    "half_full_time_odds",
+    "market.sporttery_half_full",
+    "market.half_full_time",
+    "market.half_full_time_odds",
+    "markets.sporttery.sporttery_half_full",
+    "markets.sporttery.half_full_time",
+    "markets.sporttery.half_full_time_odds",
+    "markets.calibration.sporttery_half_full",
+    "markets.calibration.half_full_time",
+]
+
+
+def extract_sporttery_1x2(payload: dict[str, Any]) -> dict[str, Any] | None:
+    path, value = _first_path(payload, SPORTTERY_1X2_PATHS)
+    if path is None:
+        return None
+    market = _as_mapping(value)
+    source = _odds_container(value)
+    home_key, home_value = _lookup_outcome(source, "home", "home_odds", "win")
+    draw_key, draw_value = _lookup_outcome(source, "draw", "draw_odds")
+    away_key, away_value = _lookup_outcome(source, "away", "away_odds", "loss")
+    if home_key is None or draw_key is None or away_key is None:
+        return None
+    return {
+        "odds": {
+            "home": _required_decimal(home_value, f"{path}.{home_key}"),
+            "draw": _required_decimal(draw_value, f"{path}.{draw_key}"),
+            "away": _required_decimal(away_value, f"{path}.{away_key}"),
+        },
+        **_copy_meta(market, source_path=path),
+    }
+
+
+def extract_sporttery_handicap_3way(payload: dict[str, Any]) -> dict[str, Any] | None:
+    path, value = _first_path(payload, SPORTTERY_HANDICAP_PATHS)
+    if path is None:
+        return None
+    market = _as_mapping(value)
+    source = _odds_container(value)
+    line = source.get("line", source.get("handicap"))
+    if line is None:
+        return None
+    try:
+        handicap = float(line)
+    except (TypeError, ValueError) as exc:
+        raise SportteryPayloadError(
+            "解析体彩 YAML 时发现字段类型错误。",
+            field_path=f"{path}.line",
+            expected="数字",
+            actual=line,
+        ) from exc
+    home_key, home_value = _lookup_outcome(source, "home", "home_win", "home_odds", "win")
+    draw_key, draw_value = _lookup_outcome(source, "draw", "draw_odds")
+    away_key, away_value = _lookup_outcome(source, "away", "away_win", "away_odds", "loss")
+    if home_key is None or draw_key is None or away_key is None:
+        return None
+    return {
+        "line": handicap,
+        "odds": {
+            "home": _required_decimal(home_value, f"{path}.{home_key}"),
+            "draw": _required_decimal(draw_value, f"{path}.{draw_key}"),
+            "away": _required_decimal(away_value, f"{path}.{away_key}"),
+        },
+        **_copy_meta(market, source_path=path),
+    }
+
+
+def extract_sporttery_correct_score(payload: dict[str, Any]) -> dict[str, Any] | None:
+    path, value = _first_path(payload, SPORTTERY_CORRECT_SCORE_PATHS)
+    if path is None:
+        return None
+    market = _as_mapping(value)
+    source = _odds_container(value)
+    scores: dict[str, float] = {}
+    for outcome, price in source.items():
+        if str(outcome) in SKIPPED_MARKET_KEYS:
+            continue
+        score = _score_key(outcome)
+        if score is not None:
+            odds = _optional_decimal(price, f"{path}.{outcome}")
+            if odds is not None:
+                scores[score] = odds
+        elif str(outcome) in {"home_other", "draw_other", "away_other"}:
+            odds = _optional_decimal(price, f"{path}.{outcome}")
+            if odds is not None:
+                scores[str(outcome)] = odds
+    if not scores:
+        return None
+    return {"scores": scores, **_copy_meta(market, source_path=path)}
+
+
+def extract_sporttery_total_goals(payload: dict[str, Any]) -> dict[str, Any] | None:
+    path, value = _first_path(payload, SPORTTERY_TOTAL_GOALS_PATHS)
+    if path is None:
+        return None
+    market = _as_mapping(value)
+    source = _odds_container(value)
+    odds: dict[str, float] = {}
+    for outcome, price in source.items():
+        if str(outcome) in SKIPPED_MARKET_KEYS:
+            continue
+        key = str(outcome).strip()
+        if key == "7":
+            key = "7+"
+        if key in TOTAL_GOALS_BUCKETS:
+            number = _optional_decimal(price, f"{path}.{outcome}")
+            if number is not None:
+                odds[key] = number
+    if not odds:
+        return None
+    return {"odds": odds, **_copy_meta(market, source_path=path)}
+
+
+def extract_sporttery_half_full(payload: dict[str, Any]) -> dict[str, Any] | None:
+    path, value = _first_path(payload, SPORTTERY_HALF_FULL_PATHS)
+    if path is None:
+        return None
+    market = _as_mapping(value)
+    source = _odds_container(value)
+    odds: dict[str, float] = {}
+    for outcome, price in source.items():
+        if str(outcome) in SKIPPED_MARKET_KEYS:
+            continue
+        key = str(outcome).strip().upper()
+        if key in HALF_FULL_KEYS:
+            number = _optional_decimal(price, f"{path}.{outcome}")
+            if number is not None:
+                odds[key] = number
+    if not odds:
+        return None
+    return {"odds": odds, **_copy_meta(market, source_path=path)}
+
+
+def normalize_sporttery_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
+    payload = deepcopy(raw_payload or {})
+    one_x_two = extract_sporttery_1x2(payload)
+    if one_x_two is None:
+        raise SportteryPayloadError(
+            "缺少体彩胜平负 1X2。",
+            checked_paths=SPORTTERY_1X2_PATHS,
+            top_level_keys=sorted(str(key) for key in payload.keys()),
+        )
+
+    match = _match_payload(payload, None)
+    sporttery_market: dict[str, Any] = {
+        "source": "yaml",
+        "provider": "sporttery",
+        "weight": 1.0,
+        "sporttery_1x2": one_x_two,
+    }
+    optional_markets = {
+        "sporttery_handicap_3way": extract_sporttery_handicap_3way(payload),
+        "sporttery_correct_score": extract_sporttery_correct_score(payload),
+        "sporttery_total_goals": extract_sporttery_total_goals(payload),
+        "sporttery_half_full": extract_sporttery_half_full(payload),
+    }
+    for key, value in optional_markets.items():
+        if value:
+            sporttery_market[key] = value
+    return {
+        "match": match,
+        "prediction_time": payload.get("prediction_time")
+        or payload.get("snapshot_time")
+        or "pre_match",
+        "odds_channels": {
+            "sporttery": {
+                "role": "primary_calibration",
+                "source": "yaml",
+                "provider": "sporttery",
+                "weight": 1.0,
+            }
+        },
+        "markets": {"sporttery": sporttery_market},
+    }
+
+
 def _markets(payload: dict[str, Any]) -> dict[str, Any]:
     return _as_mapping(payload.get("markets"))
 
@@ -172,85 +549,8 @@ def _sporttery_section(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def extract_sporttery_market(payload: dict[str, Any]) -> dict[str, Any]:
-    sporttery = _sporttery_source(payload)
-    market = _legacy_market(payload)
-    sporttery_section = _sporttery_section(payload)
-
-    one_x_two_source = _first_mapping(
-        sporttery.get("sporttery_1x2"),
-        sporttery.get("odds_1x2"),
-        sporttery.get("spf"),
-        payload.get("sporttery_1x2"),
-        market.get("odds_1x2"),
-        sporttery_section.get("spf"),
-        payload.get("odds_1x2"),
-    )
-    one_x_two = _normalize_1x2(one_x_two_source)
-
-    handicap_source = _first_mapping(
-        sporttery.get("sporttery_handicap_3way"),
-        sporttery.get("handicap_3way"),
-        sporttery.get("rqspf"),
-        payload.get("sporttery_handicap_3way"),
-        market.get("handicap_3way"),
-        market.get("rqspf"),
-        sporttery_section.get("rqspf"),
-    )
-    handicap = _normalize_handicap_3way(handicap_source)
-
-    correct_score_source = _first_mapping(
-        sporttery.get("sporttery_correct_score"),
-        sporttery.get("correct_score_odds"),
-        sporttery.get("correct_score"),
-        payload.get("sporttery_correct_score"),
-        payload.get("sporttery_correct_score_odds"),
-        market.get("correct_score_odds"),
-        market.get("correct_score"),
-        sporttery_section.get("correct_score"),
-    )
-    correct_score = _normalize_correct_score(correct_score_source)
-
-    total_goals_source = _first_mapping(
-        sporttery.get("sporttery_total_goals"),
-        sporttery.get("sporttery_total_goals_odds"),
-        sporttery.get("total_goals"),
-        payload.get("sporttery_total_goals"),
-        payload.get("sporttery_total_goals_odds"),
-        market.get("sporttery_total_goals"),
-        market.get("sporttery_total_goals_odds"),
-        market.get("total_goals"),
-        sporttery_section.get("total_goals"),
-    )
-    total_goals = _normalize_total_goals(total_goals_source)
-
-    half_full_source = _first_mapping(
-        sporttery.get("sporttery_half_full"),
-        sporttery.get("half_full_time"),
-        sporttery.get("half_full_time_odds"),
-        payload.get("sporttery_half_full"),
-        payload.get("half_full_time_odds"),
-        market.get("half_full_time"),
-        market.get("half_full_time_odds"),
-        sporttery_section.get("half_full_time"),
-    )
-    half_full = _normalize_half_full(half_full_source)
-
-    result: dict[str, Any] = {
-        "source": "yaml",
-        "provider": "sporttery",
-        "weight": 1.0,
-    }
-    if one_x_two:
-        result["sporttery_1x2"] = one_x_two
-    if handicap:
-        result["sporttery_handicap_3way"] = handicap
-    if correct_score:
-        result["sporttery_correct_score"] = correct_score
-    if total_goals:
-        result["sporttery_total_goals"] = total_goals
-    if half_full:
-        result["sporttery_half_full"] = half_full
-    return result
+    normalized = normalize_sporttery_payload(payload)
+    return (normalized.get("markets") or {}).get("sporttery") or {}
 
 
 def _split_match_text(value: Any) -> tuple[str, str]:
@@ -342,22 +642,37 @@ def normalize_sporttery_only_payload(
     movement_settings_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = deepcopy(payload or {})
-    sporttery_market = extract_sporttery_market(source)
+    base = normalize_sporttery_payload(source)
+    sporttery_market = (base.get("markets") or {}).get("sporttery") or {}
     one_x_two = _as_mapping(sporttery_market.get("sporttery_1x2"))
-    if not one_x_two:
-        raise ValueError("Sporttery 1X2 odds are required for sporttery-only prediction.")
+    one_x_two_odds = _as_mapping(one_x_two.get("odds"))
+    if not one_x_two_odds:
+        raise SportteryPayloadError(
+            "缺少体彩胜平负 1X2。",
+            checked_paths=SPORTTERY_1X2_PATHS,
+            top_level_keys=sorted(str(key) for key in source.keys()),
+        )
 
-    match = _match_payload(source, match_overrides)
+    match = deepcopy(base.get("match") or {})
+    match.update({key: value for key, value in (match_overrides or {}).items() if value not in (None, "")})
+    match["target"] = "90min_score"
     legacy_market: dict[str, Any] = {
         "odds_source": "sporttery_yaml",
         "odds_1x2": {
-            "home": one_x_two["home"],
-            "draw": one_x_two["draw"],
-            "away": one_x_two["away"],
+            "home": one_x_two_odds["home"],
+            "draw": one_x_two_odds["draw"],
+            "away": one_x_two_odds["away"],
         },
     }
     if sporttery_market.get("sporttery_handicap_3way"):
-        legacy_market["rqspf"] = deepcopy(sporttery_market["sporttery_handicap_3way"])
+        handicap = sporttery_market["sporttery_handicap_3way"]
+        handicap_odds = _as_mapping(handicap.get("odds"))
+        legacy_market["rqspf"] = {
+            "handicap": handicap.get("line", handicap.get("handicap")),
+            "home": handicap_odds.get("home", handicap.get("home")),
+            "draw": handicap_odds.get("draw", handicap.get("draw")),
+            "away": handicap_odds.get("away", handicap.get("away")),
+        }
     if sporttery_market.get("sporttery_correct_score"):
         legacy_market["correct_score_odds"] = deepcopy(
             sporttery_market["sporttery_correct_score"]
@@ -373,17 +688,8 @@ def normalize_sporttery_only_payload(
 
     normalized: dict[str, Any] = {
         "match": match,
-        "prediction_time": source.get("prediction_time")
-        or source.get("snapshot_time")
-        or "pre_match",
-        "odds_channels": {
-            "sporttery": {
-                "role": "primary_calibration",
-                "source": "yaml",
-                "provider": "sporttery",
-                "weight": 1.0,
-            }
-        },
+        "prediction_time": base.get("prediction_time", "pre_match"),
+        "odds_channels": deepcopy(base.get("odds_channels") or {}),
         "markets": {"sporttery": sporttery_market},
         "market": legacy_market,
         "market_roles": {
@@ -484,6 +790,8 @@ def run_sporttery_only_prediction(
             normalized.get("settings") if isinstance(normalized.get("settings"), dict) else {},
             {
                 "prediction_context_key": context_key,
+                "app_mode": "sporttery_only",
+                "source_mode": "sporttery_only",
                 "international_payload": {},
                 "sporttery_payload": (normalized.get("markets") or {}).get("sporttery") or {},
                 "prematch_context": prematch_context or normalized.get("prematch_context") or {},

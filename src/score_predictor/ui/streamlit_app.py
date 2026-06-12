@@ -69,6 +69,7 @@ from score_predictor.ui.form_helpers import (
     copy_default_form_state,
     rows_from_table,
 )
+from score_predictor.ui.history_components import render_prediction_history_tab
 from score_predictor.ui.yaml_io import (
     apply_prematch_context_to_form_state,
     build_yaml_from_form_state,
@@ -1865,6 +1866,8 @@ def _save_history_from_ui(
         payload.get("settings") if isinstance(payload.get("settings"), dict) else {},
         {
             "prediction_context_key": context_key,
+            "app_mode": "dual_channel",
+            "source_mode": "dual_channel",
             "international_payload": international_payload or {},
             "sporttery_payload": sporttery_payload or {},
             "prematch_context": prematch_context or {},
@@ -1937,67 +1940,11 @@ def _render_history_detail(record: dict[str, Any]) -> None:
 
 
 def _render_prediction_history_tab() -> None:
-    _section_card("预测历史", "保存每次成功预测的输入摘要、模型输出、风险提示和赔率趋势修正。历史记录不会影响下一次预测。")
-    c1, c2, c3 = st.columns([1.2, 1.2, 1.0])
-    with c1:
-        search = st.text_input("按球队搜索", value="", key="history_team_search")
-    with c2:
-        match_id_filter = st.text_input("按 match_id 搜索", value="", key="history_match_id_search")
-    with c3:
-        show_all_versions = st.checkbox("显示全部版本", value=False, key="history_show_all_versions")
-
-    if st.button("刷新历史", key="history_refresh"):
-        st.session_state["history_refresh_token"] = st.session_state.get("history_refresh_token", 0) + 1
-
-    records = (
-        list_predictions(search=search, match_id=match_id_filter or None, latest_only=False)
-        if show_all_versions
-        else list_latest_by_match(search=search, match_id=match_id_filter or None)
+    render_prediction_history_tab(
+        app_mode="dual_channel",
+        key_prefix="history",
+        title="预测历史",
     )
-    if not records:
-        render_empty_state("暂无预测历史", "成功点击开始预测后，系统会自动保存历史记录。")
-        return
-
-    table = _history_table_frame(records)
-    render_styled_table(table.drop(columns=["prediction_id"]), "历史列表", max_height=420)
-
-    options = {
-        f"{row.get('updated_at')} | {row.get('home_team')} vs {row.get('away_team')} | {row.get('prediction_id')}": row.get("prediction_id")
-        for row in records
-    }
-    selected_label = st.selectbox("选择历史记录查看详情", list(options.keys()), key="history_selected_record")
-    selected_id = str(options[selected_label])
-    detail = get_prediction_detail(selected_id)
-    if detail:
-        _render_history_detail(detail)
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.download_button(
-            "导出历史 CSV",
-            data=export_predictions_csv(records),
-            file_name="prediction_history.csv",
-            mime="text/csv",
-            key="history_export_csv",
-        )
-    with c2:
-        st.download_button(
-            "导出历史 JSON",
-            data=export_predictions_json(records),
-            file_name="prediction_history.json",
-            mime="application/json",
-            key="history_export_json",
-        )
-    with c3:
-        confirm_delete = st.checkbox("确认删除选中记录", key="history_confirm_delete")
-        if st.button("删除选中记录", key="history_delete_selected", disabled=not confirm_delete):
-            delete_prediction(selected_id)
-            _notice_card("已删除选中历史记录。", "success")
-    with c4:
-        confirm_clear = st.checkbox("确认清空历史", key="history_confirm_clear")
-        if st.button("清空历史", key="history_clear_all", disabled=not confirm_clear):
-            count = clear_history()
-            _notice_card(f"已清空历史记录：{count} 条。", "success")
 
 
 def _render_conclusion_summary(result: dict[str, Any], state: dict[str, Any]) -> None:

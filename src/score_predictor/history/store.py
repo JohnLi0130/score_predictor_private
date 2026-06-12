@@ -17,9 +17,15 @@ APP_VERSION = "prediction_history_v1"
 
 
 JSON_COLUMNS = {
+    "dashboard_snapshot_json",
+    "prediction_summary_json",
+    "score_matrix_json",
     "data_sources_json",
     "settings_json",
+    "model_settings_json",
     "input_summary_json",
+    "input_payload_summary_json",
+    "lambda_summary_json",
     "probabilities_1x2_json",
     "top_scores_json",
     "total_goals_distribution_json",
@@ -28,6 +34,7 @@ JSON_COLUMNS = {
     "odds_movement_summary_json",
     "movement_adjustment_json",
     "market_quality_json",
+    "risk_diagnostics_json",
     "warnings_json",
     "raw_result_json",
 }
@@ -83,9 +90,31 @@ CREATE TABLE IF NOT EXISTS predictions (
     actual_total_goals_90 INTEGER,
     actual_btts INTEGER,
     settled_at TEXT,
-    settlement_notes TEXT
+    settlement_notes TEXT,
+    dashboard_snapshot_json TEXT,
+    prediction_summary_json TEXT,
+    score_matrix_json TEXT,
+    lambda_summary_json TEXT,
+    risk_diagnostics_json TEXT,
+    model_settings_json TEXT,
+    input_payload_summary_json TEXT,
+    app_mode TEXT,
+    source_mode TEXT
 );
 """
+
+
+SCHEMA_MIGRATIONS: dict[str, str] = {
+    "dashboard_snapshot_json": "TEXT",
+    "prediction_summary_json": "TEXT",
+    "score_matrix_json": "TEXT",
+    "lambda_summary_json": "TEXT",
+    "risk_diagnostics_json": "TEXT",
+    "model_settings_json": "TEXT",
+    "input_payload_summary_json": "TEXT",
+    "app_mode": "TEXT",
+    "source_mode": "TEXT",
+}
 
 
 INDEXES = [
@@ -141,6 +170,16 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(_json_dumps(value).encode("utf-8")).hexdigest()
 
 
+def to_json_safe(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {str(key): to_json_safe(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [to_json_safe(value) for value in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return str(obj)
+
+
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     path = Path(db_path or DEFAULT_HISTORY_DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +192,13 @@ def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(SCHEMA)
+    existing_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(predictions)").fetchall()
+    }
+    for column, column_type in SCHEMA_MIGRATIONS.items():
+        if column not in existing_columns:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {column} {column_type}")
     for statement in INDEXES:
         conn.execute(statement)
     conn.commit()
@@ -179,16 +225,55 @@ def _extract_match_info(
     input_payload: dict[str, Any],
     context: dict[str, Any],
 ) -> dict[str, Any]:
+    result_match_info = prediction_result.get("match_info")
+    if not isinstance(result_match_info, dict):
+        result_match_info = {}
+    result_input_payload = prediction_result.get("input_payload")
+    result_input_match = {}
+    if isinstance(result_input_payload, dict):
+        result_input_match = _match_payload(result_input_payload)
     match = _match_payload(input_payload)
     home_from_result, away_from_result = _split_match(prediction_result.get("match"))
+    result_home = home_from_result if home_from_result not in {"Home", "Home FC"} else None
+    result_away = away_from_result if away_from_result not in {"Away", "Away FC"} else None
     return {
-        "match_id": match.get("match_id") or input_payload.get("match_id") or context.get("match_id"),
-        "event_id": match.get("event_id") or input_payload.get("event_id") or context.get("event_id"),
-        "home_team": match.get("home_team") or context.get("home_team") or home_from_result,
-        "away_team": match.get("away_team") or context.get("away_team") or away_from_result,
-        "competition": match.get("competition") or input_payload.get("competition"),
-        "stage": match.get("stage") or input_payload.get("stage"),
+        "match_id": result_match_info.get("match_id")
+        or result_input_match.get("match_id")
+        or match.get("match_id")
+        or input_payload.get("match_id")
+        or context.get("match_id"),
+        "event_id": result_match_info.get("event_id")
+        or result_input_match.get("event_id")
+        or match.get("event_id")
+        or input_payload.get("event_id")
+        or context.get("event_id"),
+        "home_team": result_match_info.get("home_team")
+        or result_input_match.get("home_team")
+        or result_home
+        or match.get("home_team")
+        or context.get("home_team")
+        or "Home",
+        "away_team": result_match_info.get("away_team")
+        or result_input_match.get("away_team")
+        or result_away
+        or match.get("away_team")
+        or context.get("away_team")
+        or "Away",
+        "competition": result_match_info.get("competition")
+        or result_input_match.get("competition")
+        or match.get("competition")
+        or input_payload.get("competition"),
+        "stage": result_match_info.get("stage")
+        or result_input_match.get("stage")
+        or match.get("stage")
+        or input_payload.get("stage"),
         "kickoff_time": prediction_result.get("kickoff_time")
+        or result_match_info.get("kickoff_time")
+        or result_input_match.get("commence_time_utc")
+        or result_input_match.get("kickoff_time_beijing")
+        or result_input_match.get("commence_time")
+        or result_input_match.get("kickoff_time")
+        or result_input_match.get("date")
         or match.get("commence_time_utc")
         or match.get("kickoff_time_beijing")
         or match.get("commence_time")
@@ -233,6 +318,84 @@ def _data_sources(input_payload: dict[str, Any], prediction_result: dict[str, An
         "sporttery": markets.get("sporttery") or {},
         "sporttery_market_status": v3.get("sporttery_market_status") or {},
     }
+
+
+def _infer_app_mode(input_payload: dict[str, Any], context: dict[str, Any]) -> str:
+    explicit = context.get("app_mode") or context.get("source_mode") or input_payload.get("app_mode")
+    if explicit:
+        return str(explicit)
+    channels = input_payload.get("odds_channels") if isinstance(input_payload.get("odds_channels"), dict) else {}
+    markets = _payload_markets(input_payload)
+    if "sporttery" in channels and "international" not in channels and not markets.get("international"):
+        return "sporttery_only"
+    return "dual_channel"
+
+
+def build_dashboard_snapshot(
+    prediction_result: dict[str, Any],
+    input_payload: dict[str, Any],
+    settings: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = dict(context or {})
+    settings = dict(settings or input_payload.get("settings") or {})
+    v3 = prediction_result.get("v3") or {}
+    score_records = _final_score_records(v3)
+    probabilities = v3.get("probabilities") or {}
+    flow = v3.get("lambda_flow") or {}
+    fit = v3.get("joint_fit") or {}
+    warnings = list(dict.fromkeys((prediction_result.get("warnings") or []) + (v3.get("risk_warnings") or [])))
+    match_info = _extract_match_info(prediction_result, input_payload, context)
+    lambda_summary = {
+        "lambda_home": flow.get("final_lambda_home"),
+        "lambda_away": flow.get("final_lambda_away"),
+        "rho": fit.get("rho"),
+        "lambda_home_before_movement": (v3.get("movement_adjustment") or {}).get("lambda_home_before")
+        or flow.get("lambda_home_before_movement"),
+        "lambda_away_before_movement": (v3.get("movement_adjustment") or {}).get("lambda_away_before")
+        or flow.get("lambda_away_before_movement"),
+        "rho_before_movement": (v3.get("movement_adjustment") or {}).get("rho_before")
+        or fit.get("market_rho_before_movement"),
+    }
+    return to_json_safe(
+        {
+            "match": match_info,
+            "app_mode": _infer_app_mode(input_payload, context),
+            "source_mode": context.get("source_mode") or _infer_app_mode(input_payload, context),
+            "prediction_summary": {
+                "top_scores": v3.get("top_scores") or prediction_result.get("top_scores") or [],
+                "probabilities_1x2": probabilities.get("one_x_two") or {},
+                "expected_goals": (lambda_summary.get("lambda_home") or 0)
+                + (lambda_summary.get("lambda_away") or 0),
+                "confidence_score": (v3.get("confidence") or {}).get("final_confidence_score"),
+                "risk_level": _risk_level(warnings),
+            },
+            "score_matrix": score_records,
+            "total_goals_distribution": _total_goals_distribution(score_records),
+            "over_under_probabilities": probabilities.get("over_under") or {},
+            "btts_probabilities": probabilities.get("btts") or {},
+            "lambda_summary": lambda_summary,
+            "movement_adjustment": v3.get("movement_adjustment") or {},
+            "odds_movement_summary": v3.get("odds_movement") or {},
+            "market_quality": v3.get("market_quality") or {},
+            "sporttery_market_status": v3.get("sporttery_market_status") or {},
+            "risk_diagnostics": {
+                "warnings": warnings,
+                "confidence": v3.get("confidence") or {},
+                "market_fit_errors": v3.get("market_fit_errors") or {},
+                "handicap_consistency": v3.get("handicap_consistency") or {},
+            },
+            "data_sources": _data_sources(input_payload, prediction_result),
+            "model_settings": settings,
+            "input_payload_summary": {
+                "match": _match_payload(input_payload),
+                "prediction_time": input_payload.get("prediction_time"),
+                "input_hash": _hash(input_payload),
+                "context_key": context.get("prediction_context_key") or context.get("context_key"),
+                "notes": input_payload.get("notes") or [],
+            },
+        }
+    )
 
 
 def build_prediction_record(
@@ -280,15 +443,34 @@ def build_prediction_record(
     score_records = _final_score_records(v3)
     movement = v3.get("movement_adjustment") or {}
     market_quality = v3.get("market_quality") or {}
+    app_mode = _infer_app_mode(input_payload, context)
+    source_mode = str(context.get("source_mode") or app_mode)
+    dashboard_snapshot = build_dashboard_snapshot(
+        prediction_result,
+        input_payload,
+        settings=settings,
+        context={**context, "app_mode": app_mode, "source_mode": source_mode},
+    )
+    lambda_summary = dashboard_snapshot.get("lambda_summary") or {}
+    risk_diagnostics = dashboard_snapshot.get("risk_diagnostics") or {}
     return {
         "prediction_id": context.get("prediction_id") or f"pred_{uuid4().hex}",
         "prediction_context_key": context_key,
         **match_info,
+        "app_mode": app_mode,
+        "source_mode": source_mode,
         "input_hash": context.get("input_hash") or _hash(input_payload),
         "international_payload_hash": context.get("international_payload_hash") or _hash(international_payload),
         "sporttery_payload_hash": context.get("sporttery_payload_hash") or _hash(sporttery_payload),
         "prematch_context_hash": context.get("prematch_context_hash") or _hash(prematch_context),
         "model_settings_hash": context.get("model_settings_hash") or _hash(settings),
+        "dashboard_snapshot_json": dashboard_snapshot,
+        "prediction_summary_json": dashboard_snapshot.get("prediction_summary") or {},
+        "score_matrix_json": score_records,
+        "lambda_summary_json": lambda_summary,
+        "risk_diagnostics_json": risk_diagnostics,
+        "model_settings_json": settings,
+        "input_payload_summary_json": dashboard_snapshot.get("input_payload_summary") or {},
         "data_sources_json": _data_sources(input_payload, prediction_result),
         "settings_json": settings,
         "input_summary_json": {
@@ -367,11 +549,20 @@ def upsert_prediction(
             "competition",
             "stage",
             "kickoff_time",
+            "app_mode",
+            "source_mode",
             "input_hash",
             "international_payload_hash",
             "sporttery_payload_hash",
             "prematch_context_hash",
             "model_settings_hash",
+            "dashboard_snapshot_json",
+            "prediction_summary_json",
+            "score_matrix_json",
+            "lambda_summary_json",
+            "risk_diagnostics_json",
+            "model_settings_json",
+            "input_payload_summary_json",
             "data_sources_json",
             "settings_json",
             "input_summary_json",
@@ -446,6 +637,8 @@ def list_predictions(
     *,
     search: str | None = None,
     match_id: str | None = None,
+    app_mode: str | None = None,
+    source_mode: str | None = None,
     limit: int = 100,
     latest_only: bool = False,
 ) -> list[dict[str, Any]]:
@@ -466,6 +659,10 @@ def list_predictions(
         ]
     if match_id:
         rows = [row for row in rows if str(row.get("match_id") or "") == str(match_id)]
+    if app_mode:
+        rows = [row for row in rows if str(row.get("app_mode") or "") == str(app_mode)]
+    if source_mode:
+        rows = [row for row in rows if str(row.get("source_mode") or "") == str(source_mode)]
     if latest_only:
         rows = _latest_rows_by_match(rows)
     return rows[: max(1, int(limit))]
@@ -475,7 +672,8 @@ def _latest_rows_by_match(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     latest: list[dict[str, Any]] = []
     for row in rows:
-        key = str(row.get("match_id") or f"{row.get('home_team')} vs {row.get('away_team')}")
+        match_key = row.get("match_id") or f"{row.get('home_team')} vs {row.get('away_team')}"
+        key = f"{row.get('app_mode') or ''}:{match_key}"
         if key in seen:
             continue
         seen.add(key)
@@ -488,12 +686,16 @@ def list_latest_by_match(
     *,
     search: str | None = None,
     match_id: str | None = None,
+    app_mode: str | None = None,
+    source_mode: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     return list_predictions(
         db_path,
         search=search,
         match_id=match_id,
+        app_mode=app_mode,
+        source_mode=source_mode,
         limit=limit,
         latest_only=True,
     )
@@ -521,10 +723,19 @@ def delete_prediction(prediction_id: str, db_path: Path | str | None = None) -> 
         return int(cursor.rowcount)
 
 
-def clear_history(db_path: Path | str | None = None) -> int:
+def clear_history(db_path: Path | str | None = None, *, app_mode: str | None = None) -> int:
     with _connect(db_path) as conn:
-        count = int(conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0])
-        conn.execute("DELETE FROM predictions")
+        if app_mode:
+            count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM predictions WHERE app_mode = ?",
+                    (app_mode,),
+                ).fetchone()[0]
+            )
+            conn.execute("DELETE FROM predictions WHERE app_mode = ?", (app_mode,))
+        else:
+            count = int(conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0])
+            conn.execute("DELETE FROM predictions")
         conn.commit()
         return count
 
@@ -541,6 +752,10 @@ def _probabilities(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _data_sources_label(record: dict[str, Any]) -> str:
+    if record.get("app_mode") == "sporttery_only":
+        return "体彩-only"
+    if record.get("app_mode") == "dual_channel":
+        return "国际+体彩"
     sources = record.get("data_sources_json") or {}
     channels = sources.get("odds_channels") if isinstance(sources, dict) else {}
     if not isinstance(channels, dict):

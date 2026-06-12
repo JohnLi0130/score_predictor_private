@@ -44,7 +44,11 @@ def _prediction(payload: dict) -> dict:
 
 
 def _context(payload: dict) -> dict:
-    return {"prediction_context_key": build_prediction_context_key(payload)}
+    return {
+        "prediction_context_key": build_prediction_context_key(payload),
+        "app_mode": "dual_channel",
+        "source_mode": "dual_channel",
+    }
 
 
 def test_successful_prediction_creates_history_record(tmp_path: Path) -> None:
@@ -130,6 +134,73 @@ def test_get_prediction_detail_returns_full_json_fields(tmp_path: Path) -> None:
 
     assert detail["raw_result_json"]["v3"]["top_scores"]
     assert isinstance(detail["warnings_json"], list)
+
+
+def test_history_record_saves_dashboard_snapshot_and_modes(tmp_path: Path) -> None:
+    db_path = tmp_path / "predictions.sqlite"
+    payload = _payload("m1", "Canada", "Bosnia")
+    saved = save_prediction_history(_prediction(payload), payload, payload["settings"], _context(payload), db_path)
+    detail = get_prediction_detail(saved["prediction_id"], db_path)
+
+    assert detail["app_mode"] == "dual_channel"
+    assert detail["source_mode"] == "dual_channel"
+    assert detail["dashboard_snapshot_json"]["prediction_summary"]["top_scores"]
+    assert detail["top_scores_json"]
+    assert detail["score_matrix_json"]
+
+
+def test_history_list_filters_by_app_mode(tmp_path: Path) -> None:
+    db_path = tmp_path / "predictions.sqlite"
+    payload = _payload("m1", "Canada", "Bosnia")
+    sporttery_context = {
+        **_context(payload),
+        "prediction_context_key": "sporttery-context",
+        "app_mode": "sporttery_only",
+        "source_mode": "sporttery_only",
+    }
+    save_prediction_history(_prediction(payload), payload, payload["settings"], _context(payload), db_path)
+    save_prediction_history(_prediction(payload), payload, payload["settings"], sporttery_context, db_path)
+
+    assert len(list_predictions(db_path, app_mode="dual_channel")) == 1
+    assert len(list_predictions(db_path, app_mode="sporttery_only")) == 1
+
+
+def test_history_detail_upsert_returns_latest_snapshot(tmp_path: Path) -> None:
+    db_path = tmp_path / "predictions.sqlite"
+    payload = _payload("m1", "Canada", "Bosnia")
+    context = _context(payload)
+    result_a = _prediction(payload)
+    result_b = _prediction(payload)
+    result_b["v3"]["top_scores"][0]["score"] = "9-9"
+
+    first = save_prediction_history(result_a, payload, payload["settings"], context, db_path)
+    second = save_prediction_history(result_b, payload, payload["settings"], context, db_path)
+    detail = get_prediction_detail(first["prediction_id"], db_path)
+
+    assert second["run_count"] == 2
+    assert detail["prediction_id"] == first["prediction_id"]
+    assert detail["dashboard_snapshot_json"]["prediction_summary"]["top_scores"][0]["score"] == "9-9"
+
+
+def test_history_saves_real_teams_from_result_not_default_payload() -> None:
+    payload = _payload("m1", "Home FC", "Away FC")
+    result = _prediction(_payload("m1", "United States", "Paraguay"))
+    record = build_prediction_record(result, payload, payload["settings"], _context(payload))
+
+    assert record["home_team"] == "United States"
+    assert record["away_team"] == "Paraguay"
+
+
+def test_history_detail_component_is_shared_by_both_apps() -> None:
+    root = Path(__file__).resolve().parents[1]
+    component = (root / "src/score_predictor/ui/history_components.py").read_text(encoding="utf-8")
+    main_app = (root / "src/score_predictor/ui/streamlit_app.py").read_text(encoding="utf-8")
+    sporttery_app = (root / "src/score_predictor/ui/sporttery_only_app.py").read_text(encoding="utf-8")
+
+    for label in ("Top 5", "Top 10", "胜平负", "总进球", "BTTS", "lambda", "风险提示"):
+        assert label in component
+    assert "render_prediction_history_tab" in main_app
+    assert "render_prediction_history_tab" in sporttery_app
 
 
 def test_delete_prediction_removes_single_record(tmp_path: Path) -> None:

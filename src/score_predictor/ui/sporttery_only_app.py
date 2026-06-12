@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import html
+import json
 from typing import Any
 
 import pandas as pd
@@ -32,6 +34,7 @@ from score_predictor.ui.components import (
     render_status_card,
     render_styled_table,
 )
+from score_predictor.ui.history_components import render_prediction_history_tab
 from score_predictor.ui.sporttery_only_helpers import (
     DISCLAIMER_ZH,
     ODDS_MOVEMENT_SETTINGS,
@@ -144,6 +147,9 @@ def _translate_warning(warning: Any) -> str:
 
 def _init_session() -> None:
     st.session_state.setdefault("sporttery_source_payload", None)
+    st.session_state.setdefault("sporttery_normalized_payload", None)
+    st.session_state.setdefault("sporttery_payload_source", "")
+    st.session_state.setdefault("sporttery_payload_hash", "")
     st.session_state.setdefault("sporttery_prematch_context", None)
     st.session_state.setdefault("sporttery_prediction_result", None)
     st.session_state.setdefault("sporttery_prediction_payload", None)
@@ -151,8 +157,36 @@ def _init_session() -> None:
 
 
 def _current_source_payload() -> dict[str, Any] | None:
-    payload = st.session_state.get("sporttery_source_payload")
+    payload = st.session_state.get("sporttery_normalized_payload")
     return payload if isinstance(payload, dict) else None
+
+
+def _payload_hash(payload: dict[str, Any]) -> str:
+    text = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _store_sporttery_payload(payload: dict[str, Any], source_label: str) -> dict[str, Any]:
+    normalized = normalize_sporttery_only_payload(
+        payload,
+        prematch_context=st.session_state.get("sporttery_prematch_context"),
+        settings_overrides=_settings_overrides_from_inputs(),
+        movement_settings_overrides=_movement_overrides_from_inputs(),
+    )
+    st.session_state["sporttery_source_payload"] = payload
+    st.session_state["sporttery_normalized_payload"] = normalized
+    st.session_state["sporttery_payload_source"] = source_label
+    st.session_state["sporttery_payload_hash"] = _payload_hash(normalized)
+    match = normalized.get("match") if isinstance(normalized.get("match"), dict) else {}
+    st.session_state["sporttery_match_id"] = str(match.get("match_id") or "")
+    st.session_state["sporttery_home_team"] = str(match.get("home_team") or "")
+    st.session_state["sporttery_away_team"] = str(match.get("away_team") or "")
+    st.session_state["sporttery_competition"] = str(match.get("competition") or "")
+    st.session_state["sporttery_stage"] = str(match.get("stage") or "")
+    st.session_state["sporttery_kickoff"] = str(match.get("kickoff_time") or "")
+    st.session_state["sporttery_timezone"] = str(match.get("timezone") or "Asia/Shanghai")
+    st.session_state["sporttery_neutral_site"] = bool(match.get("neutral_site", True))
+    return normalized
 
 
 def _match_overrides_from_inputs() -> dict[str, Any]:
@@ -515,14 +549,14 @@ def _render_sporttery_tab() -> None:
     if uploaded is not None:
         try:
             payload = load_yaml_payload(uploaded.getvalue())
-            st.session_state["sporttery_source_payload"] = payload
+            _store_sporttery_payload(payload, "上传文件")
             render_status_card("已载入上传的体彩 YAML。", "success")
         except Exception as exc:
             render_status_card(f"YAML 解析失败：{exc}", "danger")
     elif load_clicked:
         try:
             payload = _load_yaml_from_text(text)
-            st.session_state["sporttery_source_payload"] = payload
+            _store_sporttery_payload(payload, "手动输入")
             render_status_card("已载入手动输入的体彩 YAML。", "success")
         except Exception as exc:
             render_status_card(f"YAML 解析失败：{exc}", "danger")
@@ -532,14 +566,25 @@ def _render_sporttery_tab() -> None:
         render_empty_state("尚未载入体彩 YAML", "可以直接使用示例内容，也可以上传当前兼容结构或新结构 YAML。")
         return
     try:
-        normalized = normalize_sporttery_only_payload(
-            payload,
-            match_overrides=_match_overrides_from_inputs(),
-            prematch_context=st.session_state.get("sporttery_prematch_context"),
-            settings_overrides=_settings_overrides_from_inputs(),
-            movement_settings_overrides=_movement_overrides_from_inputs(),
-        )
+        normalized = payload
         sporttery = (normalized.get("markets") or {}).get("sporttery") or {}
+        match = normalized.get("match") if isinstance(normalized.get("match"), dict) else {}
+        one_x_two = sporttery.get("sporttery_1x2") or {}
+        one_x_two_odds = one_x_two.get("odds") if isinstance(one_x_two.get("odds"), dict) else one_x_two
+        source_label = st.session_state.get("sporttery_payload_source") or "未设置"
+        payload_hash = st.session_state.get("sporttery_payload_hash") or _payload_hash(normalized)
+        render_metadata_grid(
+            [
+                ("当前使用来源", source_label),
+                ("比赛", f"{match.get('home_team')} vs {match.get('away_team')}"),
+                ("1X2 来源路径", one_x_two.get("source_path", "未记录")),
+                (
+                    "胜平负",
+                    f"{one_x_two_odds.get('home')} / {one_x_two_odds.get('draw')} / {one_x_two_odds.get('away')}",
+                ),
+                ("payload hash", payload_hash[:16]),
+            ]
+        )
         rows = []
         labels = {
             "sporttery_1x2": "胜平负",
@@ -615,11 +660,9 @@ def _render_settings_tab() -> None:
 def _run_prediction_from_ui() -> None:
     payload = _current_source_payload()
     if payload is None:
-        payload = _load_yaml_from_text(st.session_state.get("sporttery_yaml_text") or SAMPLE_YAML)
-        st.session_state["sporttery_source_payload"] = payload
+        raise ValueError("请先上传体彩 YAML，或点击“加载体彩 YAML”使用手动输入。")
     output = run_sporttery_only_prediction(
         payload,
-        match_overrides=_match_overrides_from_inputs(),
         prematch_context=st.session_state.get("sporttery_prematch_context"),
         settings_overrides=_settings_overrides_from_inputs(),
         movement_settings_overrides=_movement_overrides_from_inputs(),
@@ -738,60 +781,11 @@ def _render_history_detail(record: dict[str, Any]) -> None:
 
 
 def _render_history_tab() -> None:
-    render_section_card("预测历史", "每次成功预测后自动保存；同一 context key 重复预测会 upsert 覆盖旧记录。")
-    c1, c2, c3 = st.columns([1.2, 1.2, 1.0])
-    with c1:
-        search = st.text_input("按球队搜索", value="", key="sporttery_history_search")
-    with c2:
-        match_filter = st.text_input("按 match_id 搜索", value="", key="sporttery_history_match")
-    with c3:
-        show_all = st.checkbox("显示全部版本", value=False, key="sporttery_history_all")
-
-    records = (
-        list_predictions(search=search, match_id=match_filter or None, latest_only=False)
-        if show_all
-        else list_latest_by_match(search=search, match_id=match_filter or None)
+    render_prediction_history_tab(
+        app_mode="sporttery_only",
+        key_prefix="sporttery_history",
+        title="预测历史",
     )
-    if not records:
-        render_empty_state("暂无预测历史", "完成一次预测后会自动保存。")
-        return
-    table = _history_table(records)
-    render_styled_table(table.drop(columns=["prediction_id"]), "历史列表", max_height=420)
-    options = {
-        f"{row.get('updated_at')} | {row.get('home_team')} vs {row.get('away_team')} | {row.get('prediction_id')}": row.get("prediction_id")
-        for row in records
-    }
-    selected_label = st.selectbox("选择历史记录查看详情", list(options.keys()), key="sporttery_history_selected")
-    selected_id = str(options[selected_label])
-    detail = get_prediction_detail(selected_id)
-    if detail:
-        _render_history_detail(detail)
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.download_button(
-            "导出历史 CSV",
-            data=export_predictions_csv(records),
-            file_name="sporttery_prediction_history.csv",
-            mime="text/csv",
-        )
-    with c2:
-        st.download_button(
-            "导出历史 JSON",
-            data=export_predictions_json(records),
-            file_name="sporttery_prediction_history.json",
-            mime="application/json",
-        )
-    with c3:
-        confirm_delete = st.checkbox("确认删除选中记录", key="sporttery_history_confirm_delete")
-        if st.button("删除选中记录", disabled=not confirm_delete, key="sporttery_history_delete"):
-            delete_prediction(selected_id)
-            render_status_card("已删除选中历史记录。", "success")
-    with c4:
-        confirm_clear = st.checkbox("确认清空历史", key="sporttery_history_confirm_clear")
-        if st.button("清空历史", disabled=not confirm_clear, key="sporttery_history_clear"):
-            count = clear_history()
-            render_status_card(f"已清空历史记录：{count} 条。", "success")
 
 
 def main() -> None:

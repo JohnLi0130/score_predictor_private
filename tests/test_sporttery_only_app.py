@@ -9,6 +9,7 @@ from score_predictor.predictor import match_input_from_dict, predict
 from score_predictor.ui.sporttery_only_helpers import (
     build_sporttery_prediction_context_key,
     get_canonical_top_score,
+    normalize_sporttery_payload,
     normalize_sporttery_only_payload,
     run_sporttery_only_prediction,
 )
@@ -150,6 +151,62 @@ def test_new_sporttery_market_structure_can_predict() -> None:
 
     assert output["match_input"].sporttery_total_goals_odds
     assert output["result"]["v3"]["top_scores"]
+
+
+def test_normalize_sporttery_payload_recognizes_universal_1x2() -> None:
+    payload = {
+        "match": {"home_team": "United States", "away_team": "Paraguay"},
+        "markets": {
+            "sporttery": {
+                "sporttery_1x2": {
+                    "odds": {"home": 1.79, "draw": 3.25, "away": 3.80},
+                    "history": [
+                        {"timestamp": "2026-06-12T08:00:00Z", "home": 1.83, "draw": 3.20, "away": 3.70}
+                    ],
+                }
+            }
+        },
+    }
+
+    normalized = normalize_sporttery_payload(payload)
+    one_x_two = normalized["markets"]["sporttery"]["sporttery_1x2"]
+
+    assert one_x_two["odds"] == {"home": 1.79, "draw": 3.25, "away": 3.80}
+    assert one_x_two["source_path"] == "markets.sporttery.sporttery_1x2"
+    assert one_x_two["history"][0]["home"] == 1.83
+
+
+def test_normalize_sporttery_payload_does_not_float_history_lists() -> None:
+    payload = _legacy_payload(with_history=True)
+    payload["market"]["correct_score_odds"] = {
+        "scores": {"0-0": 9.5, "1-0": 5.4},
+        "history": [{"scores": {"0-0": 9.7, "1-0": 5.8}}],
+    }
+    payload["market"]["sporttery_total_goals"]["history"] = [
+        {"odds": {"0": 9.8, "1": 4.4, "2": 3.2}}
+    ]
+
+    normalized = normalize_sporttery_payload(payload)
+
+    assert normalized["markets"]["sporttery"]["sporttery_1x2"]["history"]
+    assert normalized["markets"]["sporttery"]["sporttery_correct_score"]["scores"]["0-0"] == 9.5
+    assert normalized["markets"]["sporttery"]["sporttery_total_goals"]["history"]
+
+
+def test_sporttery_only_prediction_uses_loaded_payload_not_manual_sample() -> None:
+    source = (PROJECT_ROOT / "src/score_predictor/ui/sporttery_only_app.py").read_text(
+        encoding="utf-8"
+    )
+    payload = _legacy_payload()
+    payload["match"]["home_team"] = "United States"
+    payload["match"]["away_team"] = "Paraguay"
+
+    normalized = normalize_sporttery_only_payload(payload)
+
+    assert normalized["match"]["home_team"] == "United States"
+    assert normalized["match"]["away_team"] == "Paraguay"
+    assert "payload = _load_yaml_from_text(st.session_state.get(\"sporttery_yaml_text\") or SAMPLE_YAML)" not in source
+    assert "sporttery_normalized_payload" in source
 
 
 def test_sporttery_1x2_is_primary_calibration_source() -> None:

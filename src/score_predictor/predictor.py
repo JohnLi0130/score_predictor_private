@@ -128,9 +128,10 @@ def _normalize_odds_mapping(value: Any) -> dict[str, float]:
 def _normalize_1x2(value: Any) -> dict[str, float] | None:
     if not isinstance(value, dict):
         return None
-    home = value.get("home", value.get("home_odds"))
-    draw = value.get("draw", value.get("draw_odds"))
-    away = value.get("away", value.get("away_odds"))
+    source = value.get("odds") if isinstance(value.get("odds"), dict) else value
+    home = source.get("home", source.get("home_odds", source.get("win")))
+    draw = source.get("draw", source.get("draw_odds"))
+    away = source.get("away", source.get("away_odds", source.get("loss")))
     if home is None or draw is None or away is None:
         return None
     return {"home": float(home), "draw": float(draw), "away": float(away)}
@@ -184,10 +185,11 @@ def _normalize_half_full_market(value: Any) -> dict[str, float]:
 def _normalize_sporttery_handicap_3way(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    handicap = value.get("handicap", value.get("line"))
-    home = value.get("home", value.get("home_win", value.get("win")))
-    draw = value.get("draw", value.get("draw_odds"))
-    away = value.get("away", value.get("away_win", value.get("loss")))
+    source = value.get("odds") if isinstance(value.get("odds"), dict) else value
+    handicap = value.get("handicap", value.get("line", source.get("handicap", source.get("line"))))
+    home = source.get("home", source.get("home_win", source.get("win")))
+    draw = source.get("draw", source.get("draw_odds"))
+    away = source.get("away", source.get("away_win", source.get("loss")))
     if handicap is None or home is None or draw is None or away is None:
         return None
     return {
