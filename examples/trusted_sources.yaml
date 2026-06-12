@@ -1,0 +1,23 @@
+tier1_official:
+  - fifa.com
+  - the-afc.com
+  - uefa.com
+  - conmebol.com
+  - cafonline.com
+  - concacaf.com
+  - thecfa.cn
+  - sporttery.cn
+  - lottery.gov.cn
+
+tier2_data:
+  - fotmob.com
+  - sofascore.com
+  - transfermarkt.com
+  - worldfootball.net
+
+weather:
+  - open-meteo.com
+
+odds:
+  - the-odds-api.com
+

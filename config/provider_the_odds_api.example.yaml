@@ -1,0 +1,14 @@
+provider: the_odds_api
+base_url: "https://api.the-odds-api.com"
+timeout_seconds: 20
+default_regions: "eu,uk"
+default_markets: "h2h,spreads,totals"
+default_odds_format: "decimal"
+default_date_format: "iso"
+preferred_bookmakers:
+  - pinnacle
+  - betfair_ex_eu
+  - betfair_exchange
+  - bet365
+  - betfair
+  - matchbook

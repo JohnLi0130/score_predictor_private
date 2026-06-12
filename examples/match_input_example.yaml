@@ -1,0 +1,52 @@
+match: "Argentina vs Iceland"
+kickoff_time: "2026-06-10 20:00"
+timezone: "Asia/Shanghai"
+target: "90min_score"
+venue_type: "neutral"
+prediction_time: "T-24h"
+
+odds_1x2:
+  home: 1.35
+  draw: 4.80
+  away: 8.50
+
+over_under:
+  line: 2.5
+  over_odds: 1.90
+  under_odds: 1.95
+
+asian_handicap:
+  line: -1.25
+  home_odds: 1.95
+  away_odds: 1.90
+
+internal_model:
+  home_lambda: 2.05
+  away_lambda: 0.55
+
+settings:
+  market_weight: 0.65
+  max_goals: 7
+  score_model: "poisson"
+
+adjustments:
+  home_factors: [1.00]
+  away_factors: [1.00]
+  reasons:
+    - "No confirmed lineup adjustment in example."
+
+injuries:
+  home_absent: []
+  away_absent: []
+  doubtful: []
+
+motivation:
+  home: "group match"
+  away: "group match"
+
+tactical_notes:
+  home: "possession, high pressure, strong central creation"
+  away: "low block, counter attack, limited ball progression"
+
+notes:
+  - "Example data only; not a real betting recommendation."

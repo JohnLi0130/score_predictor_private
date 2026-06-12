@@ -1,0 +1,63 @@
+source_mode: "manual"
+official_squads_available: true
+official_lineups_available: false
+match_type: "friendly"
+match_importance:
+  home: "experimenting"
+  away: "experimenting"
+squad:
+  home:
+    source_url: ""
+    confirmed: true
+    key_absent_players: []
+    notes: "Manual facts-only entry."
+  away:
+    source_url: ""
+    confirmed: true
+    key_absent_players: []
+    notes: "Manual facts-only entry."
+lineups:
+  home:
+    formation: null
+    confirmed: false
+    starters: []
+    bench: []
+  away:
+    formation: null
+    confirmed: false
+    starters: []
+    bench: []
+injuries_suspensions:
+  home:
+    absent: []
+    doubtful: []
+    suspended: []
+  away:
+    absent: []
+    doubtful: []
+    suspended: []
+rest_days:
+  home: 5
+  away: 4
+travel:
+  home_travel_km: 0
+  away_travel_km: 2500
+weather:
+  temperature_c: 25
+  humidity_pct: 70
+  rain_probability_pct: 20
+  wind_kph: 10
+narrative_flags:
+  coach_debut: true
+  player_milestone: true
+  revenge_talk: false
+  public_hype_home: true
+  public_hype_away: false
+  ceremonial_match: true
+sources:
+  - type: "official_squad"
+    url: ""
+    title: "Manual official squad record"
+    retrieved_at: ""
+    trust_tier: 4
+excluded_sources: []

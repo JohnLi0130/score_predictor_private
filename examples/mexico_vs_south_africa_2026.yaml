@@ -1,0 +1,43 @@
+match: "Mexico vs South Africa"
+kickoff_time: "2026-06-12 03:00"
+timezone: "Asia/Shanghai"
+target: "90min_score"
+venue_type: "home"
+prediction_time: "T-3d"
+
+odds_1x2:
+  home: 1.31
+  draw: 4.10
+  away: 8.30
+
+# Derived from official exact total-goals odds:
+# 0: 9.50, 1: 4.40, 2: 3.05, 3: 3.60, 4: 6.15, 5: 12.50, 6: 22.00, 7+: 35.00.
+# After proportional de-vig: over 2.5 = 47.37%, under 2.5 = 52.63%.
+over_under:
+  line: 2.5
+  over_odds: 2.1110342575
+  under_odds: 1.9000622557
+
+asian_handicap:
+  line: -1.0
+  home_odds: 2.13
+  away_odds: 2.82
+
+internal_model:
+  home_lambda: 1.95
+  away_lambda: 0.60
+
+settings:
+  market_weight: 0.65
+  max_goals: 7
+  score_model: "poisson"
+
+adjustments:
+  home_factors: [1.00]
+  away_factors: [1.00]
+  reasons:
+    - "Manual internal lambdas set from host/home edge plus clear market favorite, kept conservative for opening-match risk."
+
+notes:
+  - "1X2 latest official data used: 2026-06-09 08:50, 1.31 / 4.10 / 8.30."
+  - "Over/under 2.5 was synthesized from official exact total-goals fixed odds, because no standard O/U line was provided."

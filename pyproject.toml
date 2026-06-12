@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "football-score-predictor"
+version = "0.1.0"
+description = "Pre-match 90-minute football score probability engine for entertainment use."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "httpx>=0.27",
+    "lxml>=5.0",
+    "numpy>=1.24",
+    "pandas>=1.5",
+    "pydantic>=1.10,<3",
+    "python-dateutil>=2.9",
+    "pyyaml>=6",
+    "scipy>=1.10",
+    "tenacity>=8.2",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+ui = ["streamlit", "plotly", "pandas"]
+
+[project.scripts]
+score-predict = "score_predictor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

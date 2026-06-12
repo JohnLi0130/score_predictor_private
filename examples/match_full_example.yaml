@@ -1,0 +1,114 @@
+match:
+  home_team: "China"
+  away_team: "Thailand"
+  competition: "International Friendly"
+  kickoff_time: "2026-06-09 19:35"
+  timezone: "Asia/Shanghai"
+  venue:
+    name: "Jinhua Sports Center Stadium"
+    city: "Jinhua"
+    country: "China"
+    venue_type: "home"
+  target: "90min_score"
+
+prediction_time: "T-24h"
+
+market:
+  odds_1x2:
+    home: 1.73
+    draw: 3.20
+    away: 4.18
+  over_under:
+    line: 2.5
+    over_odds: 1.90
+    under_odds: 1.95
+  asian_handicap:
+    line: -1.0
+    home_odds: 3.82
+    draw_odds: 3.11
+    away_odds: 1.83
+
+internal_model:
+  internal_lambda_home: 1.20
+  internal_lambda_away: 0.75
+  market_weight: 0.65
+
+intelligence:
+  source_mode: "manual"
+  official_squads_available: true
+  official_lineups_available: true
+  match_type: "friendly"
+  match_importance:
+    home: "medium"
+    away: "medium"
+  squad:
+    home:
+      source_url: ""
+      confirmed: true
+      key_absent_players: []
+      notes: "User-provided official squad facts."
+    away:
+      source_url: ""
+      confirmed: true
+      key_absent_players: []
+      notes: "User-provided official squad facts."
+  lineups:
+    home:
+      formation: "4-2-3-1"
+      confirmed: true
+      starters:
+        - {name: "Home GK", position: "GK", is_regular_starter: true, role_importance: "key"}
+        - {name: "Home CB1", position: "CB", is_regular_starter: true, role_importance: "starter"}
+        - {name: "Home CB2", position: "CB", is_regular_starter: true, role_importance: "starter"}
+        - {name: "Home DM", position: "DM", is_regular_starter: true, role_importance: "starter"}
+        - {name: "Home CM", position: "CM", is_regular_starter: true, role_importance: "starter"}
+        - {name: "Home AM", position: "AM", is_regular_starter: true, role_importance: "key"}
+        - {name: "Home W", position: "W", is_regular_starter: true, role_importance: "starter"}
+        - {name: "Home FW", position: "FW", is_regular_starter: true, role_importance: "key"}
+      bench: []
+    away:
+      formation: "5-3-2"
+      confirmed: true
+      starters:
+        - {name: "Away GK", position: "GK", is_regular_starter: true, role_importance: "starter"}
+        - {name: "Away CB1", position: "CB", is_regular_starter: true, role_importance: "starter"}
+        - {name: "Away CB2", position: "CB", is_regular_starter: true, role_importance: "starter"}
+        - {name: "Away CM", position: "CM", is_regular_starter: true, role_importance: "starter"}
+        - {name: "Away FW", position: "FW", is_regular_starter: true, role_importance: "starter"}
+      bench: []
+  injuries_suspensions:
+    home:
+      absent: []
+      doubtful: []
+      suspended: []
+    away:
+      absent: []
+      doubtful: []
+      suspended: []
+  rest_days:
+    home: 5
+    away: 4
+  travel:
+    home_travel_km: 0
+    away_travel_km: 2500
+  weather:
+    temperature_c: 25
+    humidity_pct: 70
+    rain_probability_pct: 20
+    wind_kph: 10
+  tactical_notes:
+    home: "Manual factual note only."
+    away: "Manual factual note only."
+  narrative_flags:
+    coach_debut: true
+    player_milestone: true
+    revenge_talk: true
+    public_hype_home: true
+    public_hype_away: false
+    ceremonial_match: true
+  sources:
+    - type: "official_lineup"
+      url: ""
+      title: "Manual official lineup record"
+      retrieved_at: ""
+      trust_tier: 4

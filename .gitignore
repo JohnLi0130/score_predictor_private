@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Secrets / credentials
+.env
+.env.*
+*.key
+secrets.*
+credentials.*
+.streamlit/secrets.toml
+
+# Local data / generated files
+data/raw/
+data/cache/
+data/input/generated/
+data/prediction_history/*.sqlite
+data/prediction_history/*.db
+竞猜赔率/
+
+# Outputs / reports / logs
+outputs/
+reports/
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temporary
+tmp/
+temp/
+
+# Local external checkouts
+git_open/

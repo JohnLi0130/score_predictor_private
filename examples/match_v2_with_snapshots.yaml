@@ -1,0 +1,47 @@
+match:
+  home_team: "Portugal"
+  away_team: "Nigeria"
+  competition: "International Friendly"
+  kickoff_time: "2026-06-10 02:45"
+  timezone: "Asia/Shanghai"
+  venue:
+    venue_type: "home"
+    latitude: 38.761
+    longitude: -9.161
+  target: "90min_score"
+
+sporttery:
+  spf:
+    home: 1.45
+    draw: 4.10
+    away: 5.80
+  rqspf:
+    handicap: -1
+    home: 2.45
+    draw: 3.65
+    away: 2.30
+
+market_snapshots:
+  - timestamp: "2026-06-09 12:00"
+    source: "sporttery_manual"
+    spf:
+      home: 1.50
+      draw: 4.00
+      away: 5.60
+    rqspf:
+      handicap: -1
+      home: 2.55
+      draw: 3.55
+      away: 2.25
+  - timestamp: "2026-06-09 22:00"
+    source: "sporttery_manual"
+    spf:
+      home: 1.45
+      draw: 4.10
+      away: 5.80
+    rqspf:
+      handicap: -1
+      home: 2.45
+      draw: 3.65
+      away: 2.30
+
