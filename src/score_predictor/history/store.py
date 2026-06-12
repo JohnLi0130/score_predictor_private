@@ -251,14 +251,18 @@ def build_prediction_record(
     warnings = list(dict.fromkeys((prediction_result.get("warnings") or []) + (v3.get("risk_warnings") or [])))
     match_info = _extract_match_info(prediction_result, input_payload, context)
     markets = _payload_markets(input_payload)
-    international_payload = (
-        context.get("international_payload")
-        or markets.get("international")
-        or input_payload.get("market")
-        or {}
-    )
-    sporttery_payload = context.get("sporttery_payload") or markets.get("sporttery") or {}
-    prematch_context = context.get("prematch_context") or input_payload.get("prematch_context") or {}
+    if "international_payload" in context:
+        international_payload = context.get("international_payload") or {}
+    else:
+        international_payload = markets.get("international") or input_payload.get("market") or {}
+    if "sporttery_payload" in context:
+        sporttery_payload = context.get("sporttery_payload") or {}
+    else:
+        sporttery_payload = markets.get("sporttery") or {}
+    if "prematch_context" in context:
+        prematch_context = context.get("prematch_context") or {}
+    else:
+        prematch_context = input_payload.get("prematch_context") or {}
     context_key = context.get("prediction_context_key") or context.get("context_key")
     if not context_key:
         context_key = _hash(

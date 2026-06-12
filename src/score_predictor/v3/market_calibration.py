@@ -54,11 +54,21 @@ def _line_key(line: float | str) -> str:
 
 def _sporttery_used_in_calibration(match_input: MatchInput) -> bool:
     channel = match_input.odds_channels.sporttery
-    if channel.role == "supplemental_calibration" and channel.weight > 0:
+    if channel.role in {"primary_calibration", "supplemental_calibration"} and channel.weight > 0:
         return True
     roles = match_input.market_roles
     calibration_sources = {source.lower().strip() for source in roles.calibration_sources}
     return "sporttery" in calibration_sources
+
+
+def _sporttery_is_primary(match_input: MatchInput) -> bool:
+    channel = match_input.odds_channels.sporttery
+    roles = match_input.market_roles
+    calibration_sources = {source.lower().strip() for source in roles.calibration_sources}
+    return channel.role == "primary_calibration" or (
+        "sporttery" in calibration_sources
+        and not match_input.international_market
+    )
 
 
 def _rmse(values: list[float]) -> float:
@@ -109,19 +119,24 @@ def _first_present_market(*markets: dict[str, Any] | None) -> dict[str, Any]:
 
 def build_market_probabilities(match_input: MatchInput) -> dict[str, Any]:
     weights = dict(MARKET_WEIGHTS)
+    sporttery_primary = _sporttery_is_primary(match_input)
     one_x_two = fair_1x2_probs(
         match_input.odds_1x2.home,
         match_input.odds_1x2.draw,
         match_input.odds_1x2.away,
     )
-    international_raw_markets: dict[str, Any] = {
-        "one_x_two": {
-            "type": "one_x_two",
-            "home": match_input.odds_1x2.home,
-            "draw": match_input.odds_1x2.draw,
-            "away": match_input.odds_1x2.away,
-        }
+    one_x_two_raw_market = {
+        "type": "one_x_two",
+        "home": match_input.odds_1x2.home,
+        "draw": match_input.odds_1x2.draw,
+        "away": match_input.odds_1x2.away,
     }
+    international_raw_markets: dict[str, Any] = {}
+    sporttery_raw_markets: dict[str, Any] = {}
+    if sporttery_primary:
+        sporttery_raw_markets["sporttery_1x2"] = dict(one_x_two_raw_market)
+    else:
+        international_raw_markets["one_x_two"] = dict(one_x_two_raw_market)
 
     over_under: dict[str, dict[str, float]] = {}
     for market in match_input.over_under_markets:
@@ -179,9 +194,10 @@ def build_market_probabilities(match_input: MatchInput) -> dict[str, Any]:
             "scores": dict(match_input.correct_score_odds),
         }
 
-    sporttery_raw_markets: dict[str, Any] = {}
     sporttery_1x2: dict[str, float] | None = None
-    if match_input.sporttery_1x2 is not None:
+    if sporttery_primary:
+        sporttery_1x2 = one_x_two
+    elif match_input.sporttery_1x2 is not None:
         sporttery_1x2 = fair_1x2_probs(
             match_input.sporttery_1x2.home,
             match_input.sporttery_1x2.draw,
@@ -245,7 +261,7 @@ def build_market_probabilities(match_input: MatchInput) -> dict[str, Any]:
 
     constraints = build_constraints_from_channels(
         {
-            "one_x_two": one_x_two,
+            "one_x_two": {} if sporttery_primary else one_x_two,
             "over_under": over_under,
             "spreads": spreads,
             "btts": btts,
@@ -253,7 +269,7 @@ def build_market_probabilities(match_input: MatchInput) -> dict[str, Any]:
             "raw_markets": international_raw_markets,
         },
         {
-            "one_x_two": sporttery_1x2,
+            "one_x_two": one_x_two if sporttery_primary else sporttery_1x2,
             "handicap_3way": sporttery_handicap_3way,
             "correct_score": sporttery_correct_score,
             "total_goals": sporttery_total_goals,
@@ -265,14 +281,22 @@ def build_market_probabilities(match_input: MatchInput) -> dict[str, Any]:
     qualities = constraints["market_quality"]
     consistency = constraints["channel_consistency"]
 
-    one_x_two_quality = qualities.get("international.one_x_two") or score_market_quality(
-        international_raw_markets["one_x_two"]
+    one_x_two_quality = qualities.get(
+        "sporttery.sporttery_1x2" if sporttery_primary else "international.one_x_two"
+    ) or score_market_quality(
+        sporttery_raw_markets.get("sporttery_1x2")
+        if sporttery_primary
+        else international_raw_markets.get("one_x_two")
     )
     primary_consistency = {"score": 1.0}
     sporttery_consistency = consistency
 
     weights["one_x_two"] = final_weight(
-        float(match_input.settings.x1x2_weight) * float(match_input.settings.h2h_weight),
+        (
+            float(match_input.settings.sporttery_1x2_weight)
+            if sporttery_primary
+            else float(match_input.settings.x1x2_weight) * float(match_input.settings.h2h_weight)
+        ),
         one_x_two_quality,
         primary_consistency,
     )
@@ -290,12 +314,15 @@ def build_market_probabilities(match_input: MatchInput) -> dict[str, Any]:
         or score_market_quality({"type": "correct_score", "scores": dict(match_input.correct_score_odds)}),
         primary_consistency,
     ) if generic_correct_score else 0.0
-    weights["sporttery_1x2"] = final_weight(
-        float(match_input.settings.sporttery_1x2_weight),
-        qualities.get("sporttery.sporttery_1x2")
-        or score_market_quality(sporttery_raw_markets.get("sporttery_1x2")),
-        sporttery_consistency,
-    ) if sporttery_1x2 else 0.0
+    if sporttery_primary:
+        weights["sporttery_1x2"] = weights["one_x_two"]
+    else:
+        weights["sporttery_1x2"] = final_weight(
+            float(match_input.settings.sporttery_1x2_weight),
+            qualities.get("sporttery.sporttery_1x2")
+            or score_market_quality(sporttery_raw_markets.get("sporttery_1x2")),
+            sporttery_consistency,
+        ) if sporttery_1x2 else 0.0
     weights["sporttery_handicap_3way"] = final_weight(
         float(match_input.settings.sporttery_handicap_3way_weight),
         qualities.get("sporttery.sporttery_handicap_3way")
@@ -318,13 +345,13 @@ def build_market_probabilities(match_input: MatchInput) -> dict[str, Any]:
 
     one_x_two_sources = [
         {
-            "channel": "international",
-            "market": "h2h_3_way",
+            "channel": "sporttery" if sporttery_primary else "international",
+            "market": "sporttery_1x2" if sporttery_primary else "h2h_3_way",
             "probabilities": one_x_two,
             "weight": weights["one_x_two"],
         }
     ]
-    if sporttery_1x2:
+    if sporttery_1x2 and not sporttery_primary:
         one_x_two_sources.append(
             {
                 "channel": "sporttery",
@@ -375,7 +402,11 @@ def build_market_probabilities(match_input: MatchInput) -> dict[str, Any]:
             match_input.settings.sporttery_1x2_weight,
             weights["sporttery_1x2"],
             sporttery_raw_markets.get("sporttery_1x2"),
-            "soft_calibration" if sporttery_1x2 else "ignored",
+            "primary_calibration"
+            if sporttery_primary
+            else "soft_calibration"
+            if sporttery_1x2
+            else "ignored",
         ),
         "sporttery_handicap_3way": status_row(
             "sporttery_handicap_3way",
