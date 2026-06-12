@@ -11,6 +11,10 @@ from .audit import build_audit
 from .data_quality import compute_data_quality
 from .ensemble import blend_lambdas
 from .intelligence.adjustments_from_intel import build_intelligence_adjustments
+from .intelligence.prematch_context import (
+    is_prematch_context_payload,
+    prematch_context_to_intelligence,
+)
 from .intelligence.schemas import IntelligenceInput
 from .market_implied import infer_lambdas_from_market, probs_from_lambdas
 from .odds import fair_1x2_probs, fair_over_under_probs
@@ -254,6 +258,15 @@ def _truthy(value: Any) -> bool:
     return bool(value)
 
 
+def _normalize_intelligence_payload(data: dict[str, Any]) -> Any:
+    prematch_context = data.get("prematch_context")
+    if isinstance(prematch_context, dict) and is_prematch_context_payload(prematch_context):
+        return prematch_context_to_intelligence(prematch_context)
+    if is_prematch_context_payload(data):
+        return prematch_context_to_intelligence(data)
+    return data.get("intelligence")
+
+
 def _estimate_internal_lambdas_from_market(
     odds_1x2: dict[str, Any] | None,
     over_under: dict[str, Any] | None,
@@ -379,6 +392,9 @@ def _normalize_input_data(data: dict[str, Any]) -> dict[str, Any]:
             normalized["sporttery_handicap_3way"] = sporttery_handicap
         normalized["market_roles"] = _normalize_market_roles(data.get("market_roles"))
         normalized["odds_channels"] = _normalize_odds_channels(data.get("odds_channels"))
+        normalized["odds_movement_settings"] = data.get("odds_movement_settings") or {}
+        normalized["market_snapshots"] = list(data.get("market_snapshots") or [])
+        normalized["intelligence"] = _normalize_intelligence_payload(data)
         normalized["sporttery_total_goals_odds"] = _normalize_total_goals_market(
             data.get("sporttery_total_goals_odds")
             or data.get("sporttery_total_goals")
@@ -475,7 +491,13 @@ def _normalize_input_data(data: dict[str, Any]) -> dict[str, Any]:
 
     normalized = {
         "match": f"{match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')}",
-        "kickoff_time": match.get("kickoff_time"),
+        "kickoff_time": (
+            match.get("commence_time_utc")
+            or match.get("kickoff_time_beijing")
+            or match.get("commence_time")
+            or match.get("kickoff_time")
+            or match.get("date")
+        ),
         "timezone": match.get("timezone", "Asia/Shanghai"),
         "target": match.get("target", "90min_score"),
         "venue_type": venue.get("venue_type", match.get("venue_type", "unknown")),
@@ -503,8 +525,10 @@ def _normalize_input_data(data: dict[str, Any]) -> dict[str, Any]:
         "value_comparison_market": value_comparison_market,
         "international_market": international_market,
         "sporttery_market": sporttery_market,
+        "market_snapshots": list(data.get("market_snapshots") or []),
         "market_roles": _normalize_market_roles(data.get("market_roles")),
         "odds_channels": _normalize_odds_channels(data.get("odds_channels")),
+        "odds_movement_settings": data.get("odds_movement_settings") or {},
         "internal_model": {
             "home_lambda": internal.get(
                 "home_lambda", internal.get("internal_lambda_home")
@@ -553,7 +577,7 @@ def _normalize_input_data(data: dict[str, Any]) -> dict[str, Any]:
         "adjustments": data.get("adjustments", {}),
         "notes": data.get("notes", []),
         "warnings": data.get("warnings", []),
-        "intelligence": data.get("intelligence"),
+        "intelligence": _normalize_intelligence_payload(data),
     }
     return _fill_market_only_internal_model(normalized)
 

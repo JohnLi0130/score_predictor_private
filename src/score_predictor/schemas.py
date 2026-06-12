@@ -189,6 +189,56 @@ class PredictionSettings(BaseModel):
         return 0.0
 
 
+class OddsMovementSettings(BaseModel):
+    enabled: bool = True
+    use_open_to_latest: bool = True
+    use_late_window: bool = True
+    late_window_hours: float = 6.0
+    affect_confidence: bool = True
+    affect_market_quality: bool = True
+    affect_lambda: bool = True
+    max_lambda_adjustment: float = 0.035
+    max_total_lambda_adjustment: float = 0.045
+    max_rho_adjustment: float = 0.02
+    movement_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "sporttery_1x2_movement": 0.08,
+            "sporttery_handicap_3way_movement": 0.06,
+            "sporttery_correct_score_movement": 0.05,
+            "sporttery_total_goals_movement": 0.08,
+            "sporttery_half_full_movement": 0.0,
+        }
+    )
+
+    @validator(
+        "late_window_hours",
+        "max_lambda_adjustment",
+        "max_total_lambda_adjustment",
+        "max_rho_adjustment",
+    )
+    def movement_limits_must_be_non_negative(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("Odds movement settings must be non-negative.")
+        return float(value)
+
+    @validator("movement_weights", pre=True, always=True)
+    def movement_weights_with_defaults(cls, value: Any) -> dict[str, float]:
+        defaults = {
+            "sporttery_1x2_movement": 0.08,
+            "sporttery_handicap_3way_movement": 0.06,
+            "sporttery_correct_score_movement": 0.05,
+            "sporttery_total_goals_movement": 0.08,
+            "sporttery_half_full_movement": 0.0,
+        }
+        if not isinstance(value, dict):
+            return defaults
+        merged = dict(defaults)
+        for key, item in value.items():
+            merged[str(key)] = max(0.0, float(item))
+        merged["sporttery_half_full_movement"] = 0.0
+        return merged
+
+
 class MarketRoles(BaseModel):
     calibration_sources: list[str] = Field(default_factory=list)
     value_comparison_sources: list[str] = Field(default_factory=lambda: ["sporttery"])
@@ -249,8 +299,12 @@ class MatchInput(BaseModel):
     value_comparison_market: dict[str, Any] = Field(default_factory=dict)
     international_market: dict[str, Any] = Field(default_factory=dict)
     sporttery_market: dict[str, Any] = Field(default_factory=dict)
+    market_snapshots: list[dict[str, Any]] = Field(default_factory=list)
     market_roles: MarketRoles = Field(default_factory=MarketRoles)
     odds_channels: OddsChannels = Field(default_factory=OddsChannels)
+    odds_movement_settings: OddsMovementSettings = Field(
+        default_factory=OddsMovementSettings
+    )
     settings: PredictionSettings = Field(default_factory=PredictionSettings)
     adjustments: LambdaAdjustments = Field(default_factory=LambdaAdjustments)
     injuries: dict[str, Any] = Field(default_factory=dict)

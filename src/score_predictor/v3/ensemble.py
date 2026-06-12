@@ -4,6 +4,10 @@ from typing import Any
 
 from score_predictor.adjustments import apply_multiplicative_adjustments
 from score_predictor.ensemble import blend_lambdas
+from score_predictor.market.odds_movement import (
+    apply_movement_to_lambda,
+    build_odds_movement_summary,
+)
 from score_predictor.schemas import MatchInput
 
 from .handicap_consistency import check_handicap_consistency
@@ -248,6 +252,22 @@ def build_v3_prediction(
     )
     final_home = max(0.05, min(5.0, final_home))
     final_away = max(0.05, min(5.0, final_away))
+    lambda_before_movement_home = final_home
+    lambda_before_movement_away = final_away
+    rho_before_movement = rho
+
+    odds_movement = build_odds_movement_summary(match_input)
+    movement_adjustment = apply_movement_to_lambda(
+        final_home,
+        final_away,
+        rho,
+        odds_movement,
+        match_input.odds_movement_settings,
+    )
+    if movement_adjustment.get("applied"):
+        final_home = max(0.05, min(5.0, float(movement_adjustment["lambda_home_after"])))
+        final_away = max(0.05, min(5.0, float(movement_adjustment["lambda_away_after"])))
+        rho = float(movement_adjustment["rho_after"])
 
     final_matrix = calibrated_score_matrix(
         final_home,
@@ -290,6 +310,18 @@ def build_v3_prediction(
         data_quality,
         sensitivity,
     )
+    if match_input.odds_movement_settings.affect_confidence:
+        movement_penalty = 1.0
+        if odds_movement.get("conflict_level") == "strong_conflict":
+            movement_penalty = 0.80
+        elif "movement_signal_weak_due_to_volatility" in (
+            odds_movement.get("themes") or []
+        ):
+            movement_penalty = 0.90
+        confidence["final_confidence_score"] = _clamp01(
+            float(confidence["final_confidence_score"]) * movement_penalty
+        )
+        confidence["odds_movement_penalty"] = movement_penalty
     contribution_table = _build_contribution_table(
         match_input,
         market_home,
@@ -298,18 +330,33 @@ def build_v3_prediction(
         blended_away,
         team_adjusted_home,
         team_adjusted_away,
-        final_home,
-        final_away,
+        lambda_before_movement_home,
+        lambda_before_movement_away,
         intel_adjustments,
         data_quality,
         audit,
     )
+    if movement_adjustment.get("applied"):
+        contribution_table.append(
+            {
+                "factor_name": "odds_movement_low_weight_lambda_adjustment",
+                "source": "odds_movement_layer",
+                "effect_on_home_lambda": final_home - lambda_before_movement_home,
+                "effect_on_away_lambda": final_away - lambda_before_movement_away,
+                "reason": ",".join(movement_adjustment.get("drivers") or [])
+                or "odds_movement",
+                "confidence": "low_weight_bounded",
+                "audit_reference": "odds_movement",
+            }
+        )
 
     warnings = []
     warnings.extend(calibration.get("warnings", []))
     warnings.extend(consistency.get("warnings", []))
     warnings.extend(channel_consistency.get("warnings", []))
     warnings.extend(sensitivity.get("warnings", []))
+    warnings.extend(odds_movement.get("warnings", []))
+    warnings.extend(movement_adjustment.get("warnings", []))
     warnings = list(dict.fromkeys(warnings))
 
     return {
@@ -321,6 +368,7 @@ def build_v3_prediction(
             "lambda_home": market_home,
             "lambda_away": market_away,
             "rho": rho,
+            "market_rho_before_movement": rho_before_movement,
             "dc_enabled": bool(dc_enabled),
             "loss": float(calibration["loss"]),
             "optimizer_success": bool(calibration["optimizer_success"]),
@@ -329,6 +377,8 @@ def build_v3_prediction(
         },
         "market_quality": calibration.get("market_quality", {}),
         "sporttery_market_status": calibration.get("sporttery_market_status", {}),
+        "odds_movement": odds_movement,
+        "movement_adjustment": movement_adjustment,
         "channel_consistency": channel_consistency,
         "market_fit_errors": calibration["market_fit_errors"],
         "correct_score_fit_error": calibration["correct_score_fit_error"],
@@ -340,6 +390,8 @@ def build_v3_prediction(
             "market_prior_lambda_away": market_away,
             "team_adjusted_lambda_home": team_adjusted_home,
             "team_adjusted_lambda_away": team_adjusted_away,
+            "lambda_home_before_movement": lambda_before_movement_home,
+            "lambda_away_before_movement": lambda_before_movement_away,
             "final_lambda_home": final_home,
             "final_lambda_away": final_away,
         },

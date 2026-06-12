@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import html
+import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,16 @@ import streamlit as st
 from score_predictor.predictor import match_input_from_dict
 from score_predictor.predictor import predict
 from score_predictor.report import format_human_report, to_pretty_json
+from score_predictor.history.store import (
+    clear_history,
+    delete_prediction,
+    export_predictions_csv,
+    export_predictions_json,
+    get_prediction_detail,
+    list_latest_by_match,
+    list_predictions,
+    save_prediction_history,
+)
 from score_predictor.connectors.odds_api_normalizer import (
     MARKET_MODE_KEYS,
     market_keys_for_mode,
@@ -58,6 +70,7 @@ from score_predictor.ui.form_helpers import (
     rows_from_table,
 )
 from score_predictor.ui.yaml_io import (
+    apply_prematch_context_to_form_state,
     build_yaml_from_form_state,
     dump_yaml,
     load_yaml_payload,
@@ -178,6 +191,15 @@ WARNING_LABELS_ZH = {
     "sporttery_rqspf_treated_as_official_handicap_win_draw_loss": (
         "让球胜平负按官方让球三项盘口处理"
     ),
+    "odds_movement_lambda_adjusted": "赔率趋势已对 lambda/rho 做低权重有界修正。",
+    "odds_movement_adjustment_clamped": "赔率趋势修正触发上限 clamp。",
+    "odds_movement_reversal": "赔率走势存在临场回摆，movement 修正强度已自动降低。",
+    "late_odds_movement_detected": "检测到临近窗口赔率回摆。",
+    "cross_market_movement_conflict": "赔率趋势跨市场信号存在分歧，已降低或关闭 movement 修正。",
+    "movement_supports_low_score_home_win": "盘口趋势显示主队方向增强，但更偏小胜结构。",
+    "movement_supports_draw_cluster": "比分趋势显示平局簇增强。",
+    "movement_signal_weak_due_to_volatility": "赔率走势震荡较高，movement 修正强度已降低。",
+    "insufficient_movement_history": "赔率趋势历史快照不足，未进行 movement 修正。",
 }
 
 DIRECTION_LABELS_ZH = {
@@ -747,6 +769,51 @@ def _translate_warning(warning: Any) -> str:
     return "模型提示：" + text.replace("_", " ")
 
 
+def _stable_payload_hash(value: Any) -> str:
+    text = json.dumps(value or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def build_prediction_context_key(
+    payload: dict[str, Any] | None,
+    *,
+    international_payload: dict[str, Any] | None = None,
+    sporttery_payload: dict[str, Any] | None = None,
+    prematch_context: dict[str, Any] | None = None,
+) -> str:
+    payload = payload or {}
+    match = payload.get("match") if isinstance(payload.get("match"), dict) else {}
+    settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+    markets = payload.get("markets") if isinstance(payload.get("markets"), dict) else {}
+    if international_payload is None:
+        international_payload = (
+            markets.get("international")
+            if isinstance(markets.get("international"), dict)
+            else payload.get("market")
+            if isinstance(payload.get("market"), dict)
+            else {}
+        )
+    if sporttery_payload is None:
+        sporttery_payload = (
+            markets.get("sporttery")
+            if isinstance(markets.get("sporttery"), dict)
+            else {}
+        )
+    context = {
+        "home_team": match.get("home_team") or payload.get("home_team"),
+        "away_team": match.get("away_team") or payload.get("away_team"),
+        "match_id": match.get("match_id") or payload.get("match_id"),
+        "event_id": match.get("event_id") or payload.get("event_id"),
+        "international_payload_hash": _stable_payload_hash(international_payload),
+        "sporttery_payload_hash": _stable_payload_hash(sporttery_payload),
+        "prematch_context_hash": _stable_payload_hash(
+            prematch_context or payload.get("prematch_context")
+        ),
+        "model_settings_hash": _stable_payload_hash(settings),
+    }
+    return _stable_payload_hash(context)
+
+
 def _risk_severity(warning: str) -> str:
     text = str(warning)
     if "conflict" in text or "optimizer_fallback" in text or "sensitive" in text:
@@ -771,6 +838,8 @@ def _load_uploaded_yaml(uploaded_file: Any) -> None:
     st.session_state["ui_form_state"] = loaded
     st.session_state["ui_form_revision"] += 1
     st.session_state["loaded_yaml_marker"] = marker
+    st.session_state["prediction_result"] = None
+    st.session_state["prediction_payload"] = None
     markets = payload.get("markets") if isinstance(payload.get("markets"), dict) else {}
     market = payload.get("market") if isinstance(payload.get("market"), dict) else {}
     source_text = " ".join(
@@ -790,6 +859,18 @@ def _load_uploaded_yaml(uploaded_file: Any) -> None:
     if markets.get("sporttery") or markets.get("value_comparison") or "sporttery" in source_text or "体彩" in source_text:
         st.session_state["b_source_payload"] = payload
         st.session_state["applied_b_source_payload"] = payload
+
+
+def _load_uploaded_prematch_context(uploaded_file: Any) -> None:
+    marker = (uploaded_file.name, uploaded_file.size)
+    if st.session_state.get("loaded_prematch_context_marker") == marker:
+        return
+    state = _active_state_snapshot()
+    loaded = apply_prematch_context_to_form_state(state, uploaded_file.getvalue())
+    st.session_state["ui_form_state"] = loaded
+    st.session_state["ui_form_revision"] += 1
+    st.session_state["loaded_prematch_context_marker"] = marker
+    st.session_state["prediction_result"] = None
 
 
 def _split_match_name(match_name: str, state: dict[str, Any]) -> tuple[str, str]:
@@ -823,11 +904,25 @@ def _one_x_two_probs(result: dict[str, Any] | None) -> dict[str, float]:
     }
 
 
-def _top_score(result: dict[str, Any] | None) -> dict[str, Any] | None:
+def get_canonical_top_score(result: dict[str, Any] | None) -> dict[str, Any] | None:
     if not result:
         return None
     top_scores = _v3_result(result).get("top_scores") or result.get("top_scores") or []
     return top_scores[0] if top_scores else None
+
+
+def _top_score(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    return get_canonical_top_score(result)
+
+
+def _display_match_time(result: dict[str, Any] | None, state: dict[str, Any]) -> str:
+    if result:
+        for key in ("kickoff_time", "commence_time", "match_time"):
+            value = result.get(key)
+            if value:
+                timezone = result.get("timezone") or state.get("timezone")
+                return f"{value} {timezone}".strip()
+    return str(state.get("date") or "")
 
 
 def _final_lambdas(result: dict[str, Any] | None) -> tuple[float | None, float | None]:
@@ -955,7 +1050,7 @@ def _render_hero(state: dict[str, Any], result: dict[str, Any] | None) -> None:
                     <div class="hero-meta">
                         <div class="meta-item">
                             <div class="meta-label">比赛时间</div>
-                            <div class="meta-value">{_escape(state.get("date"))}</div>
+                            <div class="meta-value">{_escape(_display_match_time(result, state))}</div>
                         </div>
                         <div class="meta-item">
                             <div class="meta-label">当前数据源</div>
@@ -1402,10 +1497,30 @@ def _render_international_odds_tab() -> None:
                     st.session_state.get("applied_b_source_payload")
                     or st.session_state.get("b_source_payload"),
                 )
+                context_key = build_prediction_context_key(
+                    merged_payload,
+                    international_payload=payload,
+                    sporttery_payload=st.session_state.get("applied_b_source_payload")
+                    or st.session_state.get("b_source_payload"),
+                    prematch_context=None,
+                )
                 match_input = match_input_from_dict(merged_payload)
                 result = predict(match_input, dc_enabled=bool(match_input.settings.dc_enabled))
                 st.session_state["prediction_result"] = result
                 st.session_state["prediction_payload"] = merged_payload
+                st.session_state["prediction_context_key"] = context_key
+                history_record = _save_history_from_ui(
+                    result,
+                    merged_payload,
+                    context_key,
+                    international_payload=payload,
+                    sporttery_payload=st.session_state.get("applied_b_source_payload")
+                    or st.session_state.get("b_source_payload"),
+                )
+                if history_record.get("save_action") == "updated":
+                    _notice_card("已更新同一预测记录，run_count + 1。", "success")
+                else:
+                    _notice_card("预测已保存到历史记录。", "success")
                 _notice_card("预测完成。", "success")
             except Exception as exc:
                 _notice_card(f"预测失败，请检查输入数据：{exc}", "danger")
@@ -1473,6 +1588,34 @@ def _lambda_flow_frame(v3: dict[str, Any]) -> pd.DataFrame:
         },
     ]
     return pd.DataFrame(rows)
+
+
+def _movement_adjustment_frame(v3: dict[str, Any]) -> pd.DataFrame:
+    movement = v3.get("movement_adjustment") or {}
+    summary = v3.get("odds_movement") or {}
+    if not movement and not summary:
+        return pd.DataFrame()
+    return pd.DataFrame(
+        [
+            {"metric": "enabled", "value": bool(summary.get("enabled", False))},
+            {"metric": "affect_lambda", "value": bool(summary.get("affect_lambda", False))},
+            {"metric": "lambda_home_before", "value": _fmt_number(movement.get("lambda_home_before"))},
+            {"metric": "lambda_home_after", "value": _fmt_number(movement.get("lambda_home_after"))},
+            {"metric": "lambda_away_before", "value": _fmt_number(movement.get("lambda_away_before"))},
+            {"metric": "lambda_away_after", "value": _fmt_number(movement.get("lambda_away_after"))},
+            {"metric": "rho_before", "value": _fmt_number(movement.get("rho_before"))},
+            {"metric": "rho_after", "value": _fmt_number(movement.get("rho_after"))},
+            {"metric": "home_adjustment_pct", "value": _fmt_signed_probability(movement.get("home_adjustment_pct"))},
+            {"metric": "away_adjustment_pct", "value": _fmt_signed_probability(movement.get("away_adjustment_pct"))},
+            {"metric": "total_adjustment_pct", "value": _fmt_signed_probability(movement.get("total_adjustment_pct"))},
+            {"metric": "rho_adjustment", "value": _fmt_number(movement.get("rho_adjustment"))},
+            {"metric": "applied", "value": bool(movement.get("applied", False))},
+            {"metric": "clamped", "value": bool(movement.get("clamped", False))},
+            {"metric": "themes", "value": ", ".join(summary.get("themes") or []) or "-"},
+            {"metric": "drivers", "value": ", ".join(movement.get("drivers") or []) or "-"},
+            {"metric": "warnings", "value": ", ".join(movement.get("warnings") or []) or "-"},
+        ]
+    )
 
 
 def _confidence_frame(v3: dict[str, Any]) -> pd.DataFrame:
@@ -1662,6 +1805,201 @@ def _render_downloads(
         )
 
 
+def _history_top_score(record: dict[str, Any]) -> str:
+    top_scores = record.get("top_scores_json") or []
+    if isinstance(top_scores, list) and top_scores:
+        return str(top_scores[0].get("score", ""))
+    return ""
+
+
+def _history_data_sources(record: dict[str, Any]) -> str:
+    sources = record.get("data_sources_json") or {}
+    channels = sources.get("odds_channels") if isinstance(sources, dict) else {}
+    if not isinstance(channels, dict):
+        return "-"
+    labels = []
+    for name, payload in channels.items():
+        if isinstance(payload, dict):
+            labels.append(f"{name}:{payload.get('source', '-')}")
+    return "; ".join(labels) or "-"
+
+
+def _history_table_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    for record in records:
+        probs = record.get("probabilities_1x2_json") or {}
+        rows.append(
+            {
+                "prediction_id": record.get("prediction_id"),
+                "更新时间": record.get("updated_at"),
+                "比赛": f"{record.get('home_team')} vs {record.get('away_team')}",
+                "开赛时间": record.get("kickoff_time"),
+                "主队": record.get("home_team"),
+                "客队": record.get("away_team"),
+                "最可能比分": _history_top_score(record),
+                "主胜": _fmt_probability(probs.get("home")),
+                "平": _fmt_probability(probs.get("draw")),
+                "客胜": _fmt_probability(probs.get("away")),
+                "预期进球": f"{_fmt_number(record.get('lambda_home'))} : {_fmt_number(record.get('lambda_away'))}",
+                "置信度": _fmt_probability(record.get("confidence_score")),
+                "风险等级": record.get("risk_level"),
+                "数据源": _history_data_sources(record),
+                "run_count": record.get("run_count"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _save_history_from_ui(
+    result: dict[str, Any],
+    payload: dict[str, Any],
+    context_key: str,
+    *,
+    international_payload: dict[str, Any] | None = None,
+    sporttery_payload: dict[str, Any] | None = None,
+    prematch_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return save_prediction_history(
+        result,
+        payload,
+        payload.get("settings") if isinstance(payload.get("settings"), dict) else {},
+        {
+            "prediction_context_key": context_key,
+            "international_payload": international_payload or {},
+            "sporttery_payload": sporttery_payload or {},
+            "prematch_context": prematch_context or {},
+        },
+    )
+
+
+def _render_history_detail(record: dict[str, Any]) -> None:
+    if not record:
+        return
+    st.markdown("#### 历史详情")
+    render_metadata_grid(
+        [
+            ("prediction_id", record.get("prediction_id")),
+            ("prediction_context_key", str(record.get("prediction_context_key", ""))[:16]),
+            ("比赛", f"{record.get('home_team')} vs {record.get('away_team')}"),
+            ("开赛时间", record.get("kickoff_time")),
+            ("run_count", record.get("run_count")),
+            ("更新时间", record.get("updated_at")),
+        ]
+    )
+    render_styled_table(
+        pd.DataFrame(
+            [
+                {"指标": "lambda_home", "数值": _fmt_number(record.get("lambda_home"))},
+                {"指标": "lambda_away", "数值": _fmt_number(record.get("lambda_away"))},
+                {"指标": "rho", "数值": _fmt_number(record.get("rho"))},
+                {
+                    "指标": "lambda_home_before_movement",
+                    "数值": _fmt_number(record.get("lambda_home_before_movement")),
+                },
+                {
+                    "指标": "lambda_away_before_movement",
+                    "数值": _fmt_number(record.get("lambda_away_before_movement")),
+                },
+                {
+                    "指标": "rho_before_movement",
+                    "数值": _fmt_number(record.get("rho_before_movement")),
+                },
+            ]
+        ),
+        "lambda / rho",
+        max_height=260,
+    )
+    top_scores = pd.DataFrame(record.get("top_scores_json") or [])
+    if not top_scores.empty:
+        render_styled_table(top_scores.head(10), "Top 10 比分", max_height=360)
+    render_styled_table(pd.DataFrame([record.get("probabilities_1x2_json") or {}]), "1X2 概率", max_height=160)
+    render_styled_table(pd.DataFrame([record.get("btts_probabilities_json") or {}]), "BTTS", max_height=160)
+    total_goals = record.get("total_goals_distribution_json") or {}
+    if total_goals:
+        render_styled_table(
+            pd.DataFrame(
+                [{"总进球": key, "概率": _fmt_probability(value)} for key, value in total_goals.items()]
+            ),
+            "总进球分布",
+            max_height=260,
+        )
+    movement = record.get("movement_adjustment_json") or {}
+    if movement:
+        render_styled_table(pd.DataFrame([movement]), "movement adjustment", max_height=260)
+    warnings = record.get("warnings_json") or []
+    if warnings:
+        render_styled_table(
+            pd.DataFrame([{"风险提示": _translate_warning(warning)} for warning in warnings]),
+            "风险提示",
+            max_height=260,
+        )
+    render_styled_table(pd.DataFrame([record.get("settings_json") or {}]), "模型参数", max_height=260)
+
+
+def _render_prediction_history_tab() -> None:
+    _section_card("预测历史", "保存每次成功预测的输入摘要、模型输出、风险提示和赔率趋势修正。历史记录不会影响下一次预测。")
+    c1, c2, c3 = st.columns([1.2, 1.2, 1.0])
+    with c1:
+        search = st.text_input("按球队搜索", value="", key="history_team_search")
+    with c2:
+        match_id_filter = st.text_input("按 match_id 搜索", value="", key="history_match_id_search")
+    with c3:
+        show_all_versions = st.checkbox("显示全部版本", value=False, key="history_show_all_versions")
+
+    if st.button("刷新历史", key="history_refresh"):
+        st.session_state["history_refresh_token"] = st.session_state.get("history_refresh_token", 0) + 1
+
+    records = (
+        list_predictions(search=search, match_id=match_id_filter or None, latest_only=False)
+        if show_all_versions
+        else list_latest_by_match(search=search, match_id=match_id_filter or None)
+    )
+    if not records:
+        render_empty_state("暂无预测历史", "成功点击开始预测后，系统会自动保存历史记录。")
+        return
+
+    table = _history_table_frame(records)
+    render_styled_table(table.drop(columns=["prediction_id"]), "历史列表", max_height=420)
+
+    options = {
+        f"{row.get('updated_at')} | {row.get('home_team')} vs {row.get('away_team')} | {row.get('prediction_id')}": row.get("prediction_id")
+        for row in records
+    }
+    selected_label = st.selectbox("选择历史记录查看详情", list(options.keys()), key="history_selected_record")
+    selected_id = str(options[selected_label])
+    detail = get_prediction_detail(selected_id)
+    if detail:
+        _render_history_detail(detail)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.download_button(
+            "导出历史 CSV",
+            data=export_predictions_csv(records),
+            file_name="prediction_history.csv",
+            mime="text/csv",
+            key="history_export_csv",
+        )
+    with c2:
+        st.download_button(
+            "导出历史 JSON",
+            data=export_predictions_json(records),
+            file_name="prediction_history.json",
+            mime="application/json",
+            key="history_export_json",
+        )
+    with c3:
+        confirm_delete = st.checkbox("确认删除选中记录", key="history_confirm_delete")
+        if st.button("删除选中记录", key="history_delete_selected", disabled=not confirm_delete):
+            delete_prediction(selected_id)
+            _notice_card("已删除选中历史记录。", "success")
+    with c4:
+        confirm_clear = st.checkbox("确认清空历史", key="history_confirm_clear")
+        if st.button("清空历史", key="history_clear_all", disabled=not confirm_clear):
+            count = clear_history()
+            _notice_card(f"已清空历史记录：{count} 条。", "success")
+
+
 def _render_conclusion_summary(result: dict[str, Any], state: dict[str, Any]) -> None:
     probs = _one_x_two_probs(result)
     top_score = _top_score(result)
@@ -1761,6 +2099,16 @@ def _render_result(result: dict[str, Any], payload: dict[str, Any], state: dict[
     with st.expander("高级模型诊断", expanded=False):
         st.markdown("#### Lambda 过程")
         render_styled_table(_lambda_flow_frame(v3), "Lambda 过程", max_height=330)
+
+        st.markdown("#### 赔率趋势修正")
+        movement_frame = _movement_adjustment_frame(v3)
+        if movement_frame.empty:
+            render_empty_state(
+                "暂无赔率趋势修正",
+                "当前预测没有可展示的 odds movement history。",
+            )
+        else:
+            render_styled_table(movement_frame, "赔率趋势修正", max_height=360)
 
         st.markdown("#### Dixon-Coles rho")
         fit = v3.get("joint_fit") or {}
@@ -1897,6 +2245,11 @@ def _render_audit(result: dict[str, Any] | None, state: dict[str, Any]) -> None:
         _section_card("体彩赔率通道市场质量", "展示每个体彩市场的参与状态、返还率、质量评分和最终权重。")
         render_styled_table(sporttery_status, "体彩赔率通道市场质量", max_height=360)
 
+    movement_frame = _movement_adjustment_frame(v3)
+    if not movement_frame.empty:
+        _section_card("赔率趋势修正", "展示 odds movement 是否启用、是否影响 lambda、修正前后数值、clamp 和主要驱动。")
+        render_styled_table(movement_frame, "赔率趋势修正", max_height=360)
+
     _section_card("市场拟合误差", "RMSE 越高，代表模型分布与对应盘口隐含概率偏离越大。")
     fit_errors = _fit_errors_frame(v3)
     if fit_errors.empty:
@@ -1963,6 +2316,7 @@ def main() -> None:
         context_tab,
         settings_tab,
         results_tab,
+        history_tab,
         audit_tab,
     ) = st.tabs(
         [
@@ -1972,6 +2326,7 @@ def main() -> None:
             "赛前情报",
             "模型参数",
             "预测看板",
+            "预测历史",
             "审计与风险",
         ]
     )
@@ -2115,6 +2470,45 @@ def main() -> None:
             "赛前情报通过轻量乘法修正影响 lambda_home / lambda_away / total_goals，修正幅度受 team_adjustment_strength 限制；单个事实通常 1%-5%，重大阵容事实最多 8%-12%，总修正建议限制在 ±15%，默认不应推翻市场盘口。",
             "warning",
         )
+        prematch_upload = st.file_uploader(
+            "上传赛前情报 YAML",
+            type=["yaml", "yml"],
+            key="prematch_context_yaml_upload",
+            help="仅支持 schema_version: prematch_context_v1；用于填充赛前情报字段和轻量事实修正。",
+        )
+        if prematch_upload is not None:
+            try:
+                _load_uploaded_prematch_context(prematch_upload)
+                _notice_card("赛前情报 YAML 已解析，字段已自动填充。", "success")
+            except Exception as exc:
+                _notice_card(f"赛前情报 YAML 解析失败：{exc}", "danger")
+
+        render_metadata_grid(
+            [
+                ("情报来源类型", _value("prematch_source_type") or "未上传"),
+                ("总体置信度", _value("prematch_overall_confidence") or "未上传"),
+                (
+                    "是否需要官方确认",
+                    "是" if _value("prematch_requires_official_confirmation") else "否",
+                ),
+                (
+                    "模型修正上限",
+                    f"{float(_value('prematch_max_total_adjustment') or 0.15) * 100:.0f}%",
+                ),
+                (
+                    "是否检测到主观观点",
+                    "是" if _value("prematch_subjective_detected") else "否",
+                ),
+                (
+                    "是否启用模型修正",
+                    "是" if _value("prematch_adjustment_enabled") else "否",
+                ),
+            ]
+        )
+        if _value("prematch_audit_notes"):
+            _section_card("赛前情报审计说明", "主观内容仅进入审计说明，不参与 lambda 修正。")
+            render_text_panel(_text(_value("prematch_audit_notes")))
+
         c1, c2 = st.columns(2)
         with c1:
             home_elo = st.text_input("主队 Elo", value=_text(_value("home_elo")), key=_key("home_elo"))
@@ -2402,6 +2796,16 @@ def main() -> None:
         "schedule_notes": schedule_notes,
         "motivation_notes": motivation_notes,
         "source_notes": source_notes,
+        "prematch_context": _value("prematch_context"),
+        "prematch_source_type": _value("prematch_source_type"),
+        "prematch_overall_confidence": _value("prematch_overall_confidence"),
+        "prematch_requires_official_confirmation": _value(
+            "prematch_requires_official_confirmation"
+        ),
+        "prematch_max_total_adjustment": _value("prematch_max_total_adjustment"),
+        "prematch_subjective_detected": _value("prematch_subjective_detected"),
+        "prematch_adjustment_enabled": _value("prematch_adjustment_enabled"),
+        "prematch_audit_notes": _value("prematch_audit_notes"),
         "dc_enabled": dc_enabled,
         "max_goals": max_goals,
         "market_weight": market_weight,
@@ -2446,6 +2850,19 @@ def main() -> None:
                 a_source_payload,
                 b_source_payload,
             )
+            current_context_key = build_prediction_context_key(
+                current_payload,
+                international_payload=a_source_payload,
+                sporttery_payload=b_source_payload,
+                prematch_context=_value("prematch_context"),
+            )
+            if (
+                st.session_state.get("prediction_context_key")
+                and st.session_state.get("prediction_context_key") != current_context_key
+            ):
+                st.session_state["prediction_result"] = None
+                st.session_state["prediction_payload"] = None
+            st.caption(f"prediction_context_key: {current_context_key[:12]}")
             if a_source_payload:
                 _notice_card("当前预测将优先使用已应用的国际赔率通道 payload。", "info")
             st.download_button(
@@ -2457,6 +2874,7 @@ def main() -> None:
             )
         except Exception as exc:
             current_payload = {}
+            current_context_key = ""
             _notice_card(f"输入 YAML 构建失败：{exc}", "danger")
 
         if run_prediction:
@@ -2466,8 +2884,21 @@ def main() -> None:
                 result = predict(match_input, dc_enabled=dc_enabled_for_run)
                 st.session_state["prediction_result"] = result
                 st.session_state["prediction_payload"] = current_payload
+                st.session_state["prediction_context_key"] = current_context_key
+                history_record = _save_history_from_ui(
+                    result,
+                    current_payload,
+                    current_context_key,
+                    international_payload=a_source_payload,
+                    sporttery_payload=b_source_payload,
+                    prematch_context=_value("prematch_context"),
+                )
                 st.session_state["applied_a_source_payload"] = a_source_payload
                 st.session_state["applied_b_source_payload"] = b_source_payload
+                if history_record.get("save_action") == "updated":
+                    _notice_card("已更新同一预测记录，run_count + 1。", "success")
+                else:
+                    _notice_card("预测已保存到历史记录。", "success")
                 _notice_card("预测完成。", "success")
             except Exception as exc:
                 st.session_state["prediction_result"] = None
@@ -2485,6 +2916,9 @@ def main() -> None:
                 "尚未生成预测结果",
                 "请检查比赛信息、国际赔率通道或体彩赔率通道输入后点击“开始预测”。",
             )
+
+    with history_tab:
+        _render_prediction_history_tab()
 
     with audit_tab:
         _render_audit(st.session_state.get("prediction_result"), current_state)

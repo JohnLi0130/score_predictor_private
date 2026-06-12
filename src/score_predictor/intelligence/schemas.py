@@ -84,4 +84,8 @@ class IntelligenceInput(BaseModel):
     conflicting_information: bool = False
     sources: list[dict] = Field(default_factory=list)
     excluded_sources: list[dict] = Field(default_factory=list)
-
+    source_quality: dict[str, object] = Field(default_factory=dict)
+    model_adjustment_policy: dict[str, object] = Field(default_factory=dict)
+    prematch_context: dict[str, object] = Field(default_factory=dict)
+    prematch_audit_notes: list[str] = Field(default_factory=list)
+    prematch_warnings: list[str] = Field(default_factory=list)

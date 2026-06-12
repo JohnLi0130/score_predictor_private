@@ -8,6 +8,11 @@ import yaml
 from score_predictor.market_implied import infer_lambdas_from_market
 from score_predictor.odds import fair_1x2_probs, fair_over_under_probs
 from score_predictor.predictor import match_input_from_dict
+from score_predictor.intelligence.prematch_context import (
+    is_prematch_context_payload,
+    prematch_context_to_form_state,
+    prematch_context_to_intelligence,
+)
 from score_predictor.schemas import MatchInput
 
 from .form_helpers import (
@@ -234,8 +239,21 @@ def load_yaml_to_form_state(content: bytes | str | dict[str, Any]) -> dict[str, 
     return form_state_from_yaml_dict(load_yaml_payload(content))
 
 
+def apply_prematch_context_to_form_state(
+    state: dict[str, Any],
+    content: bytes | str | dict[str, Any],
+) -> dict[str, Any]:
+    updated = deepcopy(state)
+    updated.update(prematch_context_to_form_state(content))
+    return updated
+
+
 def form_state_from_yaml_dict(data: dict[str, Any]) -> dict[str, Any]:
     state = copy_default_form_state()
+    if is_prematch_context_payload(data):
+        state.update(prematch_context_to_form_state(data))
+        return state
+
     match = data.get("match") if isinstance(data.get("match"), dict) else {}
     markets = data.get("markets") if isinstance(data.get("markets"), dict) else {}
     value_market = (
@@ -261,14 +279,20 @@ def form_state_from_yaml_dict(data: dict[str, Any]) -> dict[str, Any]:
     market_roles = data.get("market_roles") if isinstance(data.get("market_roles"), dict) else {}
     internal = data.get("internal_model") if isinstance(data.get("internal_model"), dict) else {}
     team_context = data.get("team_context") if isinstance(data.get("team_context"), dict) else {}
+    prematch_context = (
+        data.get("prematch_context") if isinstance(data.get("prematch_context"), dict) else {}
+    )
 
     if match:
         state.update(
             {
                 "match_id": match.get("match_id", state["match_id"]),
                 "date": _first_present(
-                    match.get("date"),
+                    match.get("commence_time_utc"),
+                    match.get("kickoff_time_beijing"),
+                    match.get("commence_time"),
                     match.get("kickoff_time"),
+                    match.get("date"),
                     state["date"],
                 ),
                 "home_team": match.get("home_team", state["home_team"]),
@@ -380,6 +404,8 @@ def form_state_from_yaml_dict(data: dict[str, Any]) -> dict[str, Any]:
         state["rqspf_away_odds"] = rqspf.get("away", rqspf.get("away_odds", rqspf.get("loss")))
 
     state.update({key: team_context.get(key, state[key]) for key in team_context if key in state})
+    if prematch_context and is_prematch_context_payload(prematch_context):
+        state.update(prematch_context_to_form_state(prematch_context))
     state["internal_lambda_home"] = _first_present(
         internal.get("home_lambda"),
         internal.get("internal_lambda_home"),
@@ -459,6 +485,10 @@ def _build_correct_score(rows: Any) -> dict[str, float]:
 
 
 def _build_intelligence(state: dict[str, Any]) -> dict[str, Any]:
+    prematch_context = state.get("prematch_context")
+    if isinstance(prematch_context, dict) and is_prematch_context_payload(prematch_context):
+        return prematch_context_to_intelligence(prematch_context).dict()
+
     home_absent = split_text_items(state.get("home_key_players_missing"))
     away_absent = split_text_items(state.get("away_key_players_missing"))
     sources = []
@@ -656,6 +686,25 @@ def build_yaml_from_form_state(state: dict[str, Any]) -> dict[str, Any]:
                 state.get("team_adjustment_strength") or 1.0
             ),
         },
+        "odds_movement_settings": {
+            "enabled": True,
+            "use_open_to_latest": True,
+            "use_late_window": True,
+            "late_window_hours": 6,
+            "affect_confidence": True,
+            "affect_market_quality": True,
+            "affect_lambda": True,
+            "max_lambda_adjustment": 0.035,
+            "max_total_lambda_adjustment": 0.045,
+            "max_rho_adjustment": 0.02,
+            "movement_weights": {
+                "sporttery_1x2_movement": 0.08,
+                "sporttery_handicap_3way_movement": 0.06,
+                "sporttery_correct_score_movement": 0.05,
+                "sporttery_total_goals_movement": 0.08,
+                "sporttery_half_full_movement": 0.0,
+            },
+        },
         "team_context": {
             key: state.get(key)
             for key in (
@@ -685,6 +734,10 @@ def build_yaml_from_form_state(state: dict[str, Any]) -> dict[str, Any]:
         },
         "notes": ["Synthetic UI input; not a betting recommendation."],
     }
+    if isinstance(state.get("prematch_context"), dict) and is_prematch_context_payload(
+        state["prematch_context"]
+    ):
+        payload["prematch_context"] = deepcopy(state["prematch_context"])
 
     market_only = bool(state.get("market_only_mode"))
     if market_only:

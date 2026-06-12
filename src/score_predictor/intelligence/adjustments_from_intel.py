@@ -10,6 +10,66 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+def _scale_factor_delta(factor: float, multiplier: float) -> float:
+    return 1.0 + ((factor - 1.0) * multiplier)
+
+
+def _apply_prematch_context_policy(result: dict, intel: IntelligenceInput) -> dict:
+    policy = intel.model_adjustment_policy or {}
+    if not policy:
+        return result
+
+    adjusted = dict(result)
+    warnings = list(adjusted.get("warnings") or [])
+    drivers = list(adjusted.get("drivers") or [])
+
+    if not bool(policy.get("enabled", True)):
+        adjusted["home_lambda_factor"] = 1.0
+        adjusted["away_lambda_factor"] = 1.0
+        adjusted["total_lambda_factor"] = 1.0
+        warnings.append("prematch_context_adjustment_disabled")
+    else:
+        multiplier = float(policy.get("source_strength_multiplier", 1.0) or 1.0)
+        if multiplier < 1.0:
+            adjusted["home_lambda_factor"] = _scale_factor_delta(
+                float(adjusted["home_lambda_factor"]), multiplier
+            )
+            adjusted["away_lambda_factor"] = _scale_factor_delta(
+                float(adjusted["away_lambda_factor"]), multiplier
+            )
+            adjusted["total_lambda_factor"] = _scale_factor_delta(
+                float(adjusted["total_lambda_factor"]), multiplier
+            )
+            warnings.append("prematch_context_source_quality_reduced_adjustment")
+
+        max_total = float(policy.get("max_total_adjustment", 0.15) or 0.15)
+        lower = max(0.01, 1.0 - max_total)
+        upper = 1.0 + max_total
+        capped = False
+        for key in ("home_lambda_factor", "away_lambda_factor", "total_lambda_factor"):
+            before = float(adjusted[key])
+            adjusted[key] = _clamp(before, lower, upper)
+            capped = capped or adjusted[key] != before
+        if capped:
+            warnings.append("prematch_context_total_adjustment_capped")
+
+    warnings.extend(intel.prematch_warnings)
+    if intel.prematch_audit_notes:
+        drivers.append("prematch_context_subjective_content_audit_only")
+
+    diagnostics = dict(adjusted.get("diagnostics") or {})
+    diagnostics["prematch_context"] = {
+        "source_quality": intel.source_quality,
+        "model_adjustment_policy": policy,
+        "audit_notes": intel.prematch_audit_notes,
+        "subjective_detected": bool(intel.prematch_audit_notes),
+    }
+    adjusted["warnings"] = list(dict.fromkeys(warnings))
+    adjusted["drivers"] = list(dict.fromkeys(drivers))
+    adjusted["diagnostics"] = diagnostics
+    return adjusted
+
+
 def _team_has_absence(intel: IntelligenceInput, team: str, keyword: str) -> bool:
     injuries = intel.injuries_suspensions.get(team)
     if injuries is None:
@@ -140,7 +200,7 @@ def build_intelligence_adjustments(
     warnings.extend(away_lsi.get("warnings", []))
     warnings.extend(match_intensity.get("warnings", []))
 
-    return {
+    result = {
         "market_weight": _clamp(market_weight, 0.40, 0.80),
         "home_lambda_factor": _clamp(home_factor, 0.70, 1.25),
         "away_lambda_factor": _clamp(away_factor, 0.70, 1.25),
@@ -153,4 +213,4 @@ def build_intelligence_adjustments(
             "narrative_heat": narrative_heat,
         },
     }
-
+    return _apply_prematch_context_policy(result, intel)
